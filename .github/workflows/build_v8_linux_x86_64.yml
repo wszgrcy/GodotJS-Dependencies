@@ -53,6 +53,13 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ninja-build generate-ninja pkg-config ca-certificates
 
+          # V8 15 uses std::atomic_ref, which needs libstdc++ from GCC 12 or newer.
+          # ubuntu-22.04 ships GCC 11. clang picks up the newest GCC installation it
+          # can find, so installing g++-13 next to the default compiler is enough.
+          if [ "${V8_VERSION%%.*}" -ge 15 ]; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-13
+          fi
+
           cd $GITHUB_WORKSPACE
           if [ ! -d "$GITHUB_WORKSPACE/depot_tools" ]; then
             git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
@@ -82,6 +89,7 @@ jobs:
           sudo rm -rf /var/lib/apt/lists/* || true
           python ./tools/dev/v8gen.py x64.release
           cp $GITHUB_WORKSPACE/Scripts/v8.linux_x86_64.args.gn $GITHUB_WORKSPACE/v8/v8/out.gn/x64.release/args.gn
+          bash $GITHUB_WORKSPACE/Scripts/prepare_v8_build.sh $GITHUB_WORKSPACE/v8/v8 $GITHUB_WORKSPACE/v8/v8/out.gn/x64.release/args.gn "$V8_VERSION"
           ls -l $GITHUB_WORKSPACE/v8/v8/out.gn/x64.release/
           ninja -C ./out.gn/x64.release v8_monolith
 

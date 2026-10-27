@@ -1,0 +1,20 @@
+# Extra gn args for V8 15.x and newer.
+#
+# prepare_v8_build.sh appends this file to the per-platform args.gn when the
+# requested V8 version is 15 or newer. They cannot live in the per-platform
+# files because gn refuses args that a given V8 version does not declare, and
+# the older versions we still build do not declare them.
+
+# Left unset, V8 15 derives this to true. partition_alloc is written against
+# libc++, so it does not compile with use_custom_libcxx = false, and the flag
+# changes nothing for V8 itself when V8 is embedded in another program.
+v8_enable_partition_alloc = false
+
+# Temporal support is a Rust component, and the Rust toolchain is only needed
+# for it. Turning both off keeps the toolchain requirements the same as before.
+v8_enable_temporal_support = false
+enable_rust = false
+
+# Only used by the test targets, and it pulls in protobuf; v8_monolith does not
+# need it.
+v8_enable_fuzztest = false

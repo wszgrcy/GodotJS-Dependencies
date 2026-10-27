@@ -82,6 +82,15 @@ jobs:
           echo _____list_____
           dir .\out.gn\x64.release
           more .\out.gn\x64.release\args.gn
+          rem V8 15 and newer default these to on, and they need Rust or libc++.
+          rem gn regenerates itself because args.gn changed.
+          for /f "delims=." %%v in ("%V8_VERSION%") do set V8_MAJOR=%%v
+          if %V8_MAJOR% GEQ 15 (
+            echo v8_enable_partition_alloc = false>> .\out.gn\x64.release\args.gn
+            echo v8_enable_temporal_support = false>> .\out.gn\x64.release\args.gn
+            echo enable_rust = false>> .\out.gn\x64.release\args.gn
+            echo v8_enable_fuzztest = false>> .\out.gn\x64.release\args.gn
+          )
           echo _____build_____
           call ninja -C .\out.gn\x64.release v8_monolith
           echo _____results_____
