@@ -28,11 +28,17 @@ jobs:
           cd $env:GITHUB_WORKSPACE
           git clone https://libwebsockets.org/repo/libwebsockets
           cd libwebsockets
-          git checkout v4.3-stable
+          # Pinned to a tag on purpose: the branch moves, and the tip of
+          # v4.3-stable (3df0148, "pollfd: narrow vpt declaration guard to
+          # exclude FreeRTOS / Windows") dropped the vpt declaration that
+          # pollfd.c still uses on Windows, so MSVC could no longer build it.
+          # v4.3.10 is the last commit before that change.
+          git checkout v4.3.10
 
       - name: Build lws (windows x86_64)
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
           cd "$env:GITHUB_WORKSPACE/libwebsockets"
           New-Item -ItemType Directory -Force -Path out | Out-Null
@@ -42,12 +48,17 @@ jobs:
             -DLWS_WITH_SSL=0 `
             -DCMAKE_C_FLAGS_RELEASE="/MT /O2 /Ob2 /DNDEBUG" `
             ..
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
           cmake --build . --config Release -- /m
+          if ($LASTEXITCODE -ne 0) { throw "cmake build failed ($LASTEXITCODE)" }
           cd "$env:GITHUB_WORKSPACE"
           New-Item -ItemType Directory -Force -Path staging/lws/windows_x86_64_release | Out-Null
           Copy-Item -Recurse libwebsockets/out/include staging/lws/windows_x86_64_release/
           $lib = Get-ChildItem -Path libwebsockets -Recurse -Filter "*websockets*.lib" | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
-          if (-not $lib) { $lib = Get-ChildItem -Path libwebsockets -Recurse -Filter "*websockets*.lib" | Select-Object -First 1 }
+          if (-not $lib) {
+              Get-ChildItem -Path libwebsockets/out -Recurse -Filter "*.lib" | ForEach-Object { $_.FullName }
+              throw "the build did not produce a websockets .lib"
+          }
           Copy-Item $lib.FullName staging/lws/windows_x86_64_release/
 
       - name: Upload lws (windows x86_64)

@@ -28,26 +28,40 @@ jobs:
           cd $env:GITHUB_WORKSPACE
           git clone https://libwebsockets.org/repo/libwebsockets
           cd libwebsockets
-          git checkout v4.3-stable
+          # Pinned to a tag on purpose: the branch moves, and the tip of
+          # v4.3-stable (3df0148, "pollfd: narrow vpt declaration guard to
+          # exclude FreeRTOS / Windows") dropped the vpt declaration that
+          # pollfd.c still uses on Windows, so MSVC could no longer build it.
+          # v4.3.10 is the last commit before that change.
+          git checkout v4.3.10
 
       - name: Build lws (windows arm64)
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
           cd "$env:GITHUB_WORKSPACE/libwebsockets"
           New-Item -ItemType Directory -Force -Path out | Out-Null
           cd out
+          # NOTE: -A x64 means the library labelled windows_arm64 is really an x64
+          # build. Moving to -A ARM64 needs the ARM64 MSVC toolset on the runner and
+          # a windows arm64 engine build to link against it, so it is left alone here.
           cmake -G "Visual Studio 17 2022" -A x64 `
             -DLWS_WITH_SHARED=OFF `
             -DLWS_WITH_SSL=0 `
             -DCMAKE_C_FLAGS_RELEASE="/MT /O2 /Ob2 /DNDEBUG" `
             ..
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
           cmake --build . --config Release -- /m
+          if ($LASTEXITCODE -ne 0) { throw "cmake build failed ($LASTEXITCODE)" }
           cd "$env:GITHUB_WORKSPACE"
           New-Item -ItemType Directory -Force -Path staging/lws/windows_arm64_release | Out-Null
           Copy-Item -Recurse libwebsockets/out/include staging/lws/windows_arm64_release/
           $lib = Get-ChildItem -Path libwebsockets -Recurse -Filter "*websockets*.lib" | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
-          if (-not $lib) { $lib = Get-ChildItem -Path libwebsockets -Recurse -Filter "*websockets*.lib" | Select-Object -First 1 }
+          if (-not $lib) {
+              Get-ChildItem -Path libwebsockets/out -Recurse -Filter "*.lib" | ForEach-Object { $_.FullName }
+              throw "the build did not produce a websockets .lib"
+          }
           Copy-Item $lib.FullName staging/lws/windows_arm64_release/
 
       - name: Upload lws (windows arm64)

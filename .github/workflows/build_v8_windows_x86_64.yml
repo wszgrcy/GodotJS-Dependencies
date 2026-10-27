@@ -35,6 +35,60 @@ jobs:
           python-version: '3.12'
           architecture: 'x64'
 
+      - name: Install Windows SDK 10.0.28000
+        shell: pwsh
+        run: |
+          # V8 15 hard-codes the Windows SDK version it wants (build/vs_toolchain.py:
+          # SDK_VERSION = '10.0.28000.0') and build/toolchain/win/setup_toolchain.py passes
+          # that version to vcvarsall.bat. The windows-2022 image only ships
+          # 10.0.17763/19041/22621/26100, so gn stops with 'Path "...\include\10.0.28000.0\um"
+          # ... does not exist'. Installing the SDK lets us keep the image's Visual Studio 2022.
+          $ErrorActionPreference = "Stop"
+          if (([int](($env:V8_VERSION -split '\.')[0])) -lt 15) {
+            echo "V8 $env:V8_VERSION does not need the 10.0.28000 SDK."
+            exit 0
+          }
+
+          $sdk = "10.0.28000.0"
+          $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10"
+          if (Test-Path (Join-Path $kits "Include\$sdk\um")) {
+            echo "Windows SDK $sdk is already installed."
+            exit 0
+          }
+
+          # Official installer link for Windows SDK 10.0.28000.2270, the build named in
+          # build/vs_toolchain.py: https://learn.microsoft.com/windows/apps/windows-sdk/downloads
+          $setup = Join-Path $env:RUNNER_TEMP "winsdksetup.exe"
+          echo "Downloading the Windows SDK $sdk installer..."
+          Invoke-WebRequest "https://go.microsoft.com/fwlink/?linkid=2370315" -OutFile $setup
+
+          # Desktop C++ headers and import libraries. gn probes the x86, x64 and arm64
+          # toolchains, so all three sets of import libraries have to be present.
+          $features = "OptionId.DesktopCPPx86 OptionId.DesktopCPPx64 OptionId.DesktopCPParm64"
+          $log = Join-Path $env:RUNNER_TEMP "winsdksetup.log"
+          $installer = Start-Process -FilePath $setup -Wait -PassThru `
+            -ArgumentList "/quiet /norestart /features $features /l `"$log`""
+          # 3010 means installed, reboot required.
+          if ($installer.ExitCode -ne 0 -and $installer.ExitCode -ne 3010) {
+            if (Test-Path $log) { Get-Content $log -Tail 60 }
+            throw "winsdksetup.exe exited with code $($installer.ExitCode)"
+          }
+
+          # Fail here with a readable message instead of inside gn, and show what is there.
+          foreach ($dir in @("Include\$sdk\um", "Include\$sdk\ucrt", "Lib\$sdk\um\x64", "Lib\$sdk\ucrt\x64")) {
+            if (-not (Test-Path (Join-Path $kits $dir))) { throw "Windows SDK $sdk is missing $dir after install" }
+          }
+          echo "Windows SDK $sdk installed. Import libraries:"
+          Get-ChildItem (Join-Path $kits "Lib\$sdk") -Directory -Recurse -Depth 1 |
+            ForEach-Object { echo "  $($_.FullName)" }
+          # ninja also runs rc.exe / mt.exe / midl.exe out of bin\<sdk>\x64. They come from
+          # the same feature set, so just report them: a missing one is easier to read here
+          # than as a linker error several minutes later.
+          foreach ($tool in "rc.exe", "mt.exe", "midl.exe") {
+            $toolPath = Join-Path $kits "bin\$sdk\x64\$tool"
+            if (Test-Path $toolPath) { echo "  found $toolPath" } else { echo "  MISSING $toolPath" }
+          }
+
       - name: Fetch v8
         shell: cmd
         run: |
@@ -78,7 +132,7 @@ jobs:
           cd v8
           cd v8
           echo _____ninja_____ dont know why v8gen.py cant properly generate files we want
-          call gn gen .\out.gn\x64.release -args="is_component_build=false is_debug=false target_cpu=""x64"" target_os=""win"" v8_enable_i18n_support=false v8_monolithic=true v8_use_external_startup_data=false v8_enable_pointer_compression=true v8_jitless=false use_custom_libcxx=false treat_warnings_as_errors=false v8_symbol_level=0 v8_enable_sandbox=false"
+          call gn gen .\out.gn\x64.release -args="is_component_build=false is_debug=false target_cpu=""x64"" target_os=""win"" v8_enable_i18n_support=false v8_monolithic=true v8_use_external_startup_data=false v8_enable_pointer_compression=true v8_jitless=false use_custom_libcxx=false treat_warnings_as_errors=false v8_symbol_level=0 v8_enable_sandbox=false" || exit /b 1
           echo _____list_____
           dir .\out.gn\x64.release
           more .\out.gn\x64.release\args.gn
@@ -92,7 +146,7 @@ jobs:
             echo v8_enable_fuzztest = false>> .\out.gn\x64.release\args.gn
           )
           echo _____build_____
-          call ninja -C .\out.gn\x64.release v8_monolith
+          call ninja -C .\out.gn\x64.release v8_monolith || exit /b 1
           echo _____results_____
           dir %GITHUB_WORKSPACE%\v8\v8\out.gn\x64.release\obj\*.lib
 

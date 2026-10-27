@@ -21,3 +21,7 @@ treat_warnings_as_errors = false    #
 v8_symbol_level = 0                 # smaller lib 
 v8_enable_sandbox = false 
 use_rtti = true
+# V8 15 needs C++20 library features (std::bit_cast, <source_location>) that the
+# Debian bullseye sysroot inside V8 does not ship, so compile against the runner
+# instead. This raises the glibc floor of the Linux artifacts to the runner (2.35).
+use_sysroot = false
