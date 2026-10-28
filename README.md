@@ -68,6 +68,34 @@ The Linux x86_64 build of 15.6.75.19 was verified locally: `libv8_monolith.a`
 links with plain `g++ -std=c++20 ... -lv8_monolith -latomic` and the resulting
 program runs JavaScript and reports `V8 version: 15.6.75.19`.
 
+## Windows needs V8 15.7.112.1 or newer
+
+15.6.75.19 builds on Linux and macOS but **cannot be built for Windows at all**,
+and no build setting changes that. The MSVC standard library implements
+`std::atomic<T>` with `alignas(sizeof(T))`, and under the Microsoft C++ ABI a
+required alignment cannot be lowered again by `#pragma pack`. V8's `Map` holds
+`std::atomic` bit fields, so the `pack(1)` `ExtendedMap` — which deliberately
+leaves `kTaggedSize - 1` bytes of tail padding for its subclasses — comes out 3
+bytes wider than the packed size Torque computed, while the base subobject is not
+rounded up and the subclass field still lands at the old offset. The generated
+layout assertions then fail during the build:
+
+```
+gen/torque-generated/src/objects/js-interceptor-map-tq.cc:
+  static_assert(kFlagsOffset == offsetof(JSInterceptorMap, flags_))
+  expression evaluates to '44 == 41'
+```
+
+Upstream fixed it in `99ebeac9c548e36f9e18658097df0b6c42b1c71c`, "[torque] Fix C++
+object layout assertions for MSVC STL" (2026-09-29, bug 531344950, also
+nodejs/node#65161), and the first V8 release branch carrying it is 15.7.112. That
+is why the default `v8_version` is `15.7.112.12` rather than `15.6.75.19`.
+
+Going from 15.6 to 15.7 moves 8 files in `include/` (67 added, 22 removed lines),
+all of it additive — a new `DynamicScriptCompiledFromEmbedderCallback`, LA57
+external-pointer constants, and debug-protocol fields — so the embedder side
+should not need changes.
+
 `docs/v8-15.md` has the full write-up: why each extra arg is needed, how to turn
 CREL back on (it takes a change in both repositories), the local build recipe,
 and what has not been verified yet.

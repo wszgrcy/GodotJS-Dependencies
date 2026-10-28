@@ -11,12 +11,16 @@ on:
         description: 'v8 version tag'
         type: choice
         options:
+          - "15.7.112.12"
+          # 15.6.75.19 and older cannot be built for Windows at all, see the
+          # "V8 15.x and newer" section of the README. Kept so an existing
+          # Linux-only bundle can still be reproduced.
           - "15.6.75.19"
           - "13.5.119"
           - "12.9.202.28" # 2022
           - "12.4.254.21" # 2019
         required: true
-        default: "15.6.75.19"
+        default: "15.7.112.12"
 
 jobs:
   v8_android_arm64:
