@@ -138,13 +138,28 @@ jobs:
           more .\out.gn\x64.release\args.gn
           rem V8 15 and newer default these to on, and they need Rust or libc++.
           rem gn regenerates itself because args.gn changed.
-          for /f "delims=." %%v in ("%V8_VERSION%") do set V8_MAJOR=%%v
+          for /f "tokens=1,2 delims=." %%v in ("%V8_VERSION%") do (set V8_MAJOR=%%v& set V8_MINOR=%%w)
           if %V8_MAJOR% GEQ 15 (
             echo v8_enable_partition_alloc = false>> .\out.gn\x64.release\args.gn
             echo v8_enable_temporal_support = false>> .\out.gn\x64.release\args.gn
             echo enable_rust = false>> .\out.gn\x64.release\args.gn
             echo v8_enable_fuzztest = false>> .\out.gn\x64.release\args.gn
           )
+          rem V8 15.7+ has metagen read the object layout out of the C++ headers
+          rem with libclang, and metagen insists that sizeof(class) equals the end
+          rem of its fields. The MSVC STL gives std::atomic a required alignment
+          rem that #pragma pack cannot lower again, so ExtendedMap ends up 44
+          rem bytes wide while its fields stop at 41 (the 3 bytes are deliberately
+          rem left for subclasses to fill), and metagen aborts the build.
+          rem Upstream's fix 99ebeac9c548 only covers the Torque path, so take that
+          rem path: v8_use_metagen=false is supported, upstream keeps two bots on it
+          rem (debug_x64_no_metagen and torque_compare in infra/mb/mb_config.pyl).
+          rem The flag does not exist before 15.7, hence the version gate.
+          rem Drop these two lines once metagen can represent the gap, either
+          rem through an annotation for fixed tail padding or by ExtendedMap
+          rem dropping it. Upstream plans to delete Torque's old path eventually.
+          if %V8_MAJOR% GTR 15 echo v8_use_metagen = false>> .\out.gn\x64.release\args.gn
+          if %V8_MAJOR% EQU 15 if %V8_MINOR% GEQ 7 echo v8_use_metagen = false>> .\out.gn\x64.release\args.gn
           echo _____build_____
           call ninja -C .\out.gn\x64.release v8_monolith || exit /b 1
           echo _____results_____

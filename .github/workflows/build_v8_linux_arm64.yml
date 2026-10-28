@@ -60,6 +60,22 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-13
           fi
 
+          # args.gn sets use_sysroot=false, so a --target=aarch64-linux-gnu compile
+          # has to find an arm64 C library and libstdc++ on the runner itself. This
+          # is a cross build, so the host headers do not count: without these two
+          # packages clang stops at '#include <memory>' in v8config.h, and metagen
+          # stops at 'bits/libc-header-start.h'. The cross libstdc++ has to be
+          # GCC 12+ for the same reason the host one does, so prefer the versioned
+          # package and fall back to whatever the default cross g++ provides.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libc6-dev-arm64-cross
+          if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-13-aarch64-linux-gnu; then
+            echo "installed g++-13-aarch64-linux-gnu"
+          else
+            echo "g++-13-aarch64-linux-gnu is not available here, using the default cross g++"
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-aarch64-linux-gnu
+          fi
+          ls -d /usr/lib/gcc-cross/aarch64-linux-gnu/* /usr/aarch64-linux-gnu/include/c++/*
+
           cd $GITHUB_WORKSPACE
           if [ ! -d "$GITHUB_WORKSPACE/depot_tools" ]; then
             git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git

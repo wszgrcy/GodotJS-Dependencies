@@ -141,13 +141,19 @@ jobs:
           more .\out.gn\arm64.release\args.gn
           rem V8 15 and newer default these to on, and they need Rust or libc++.
           rem gn regenerates itself because args.gn changed.
-          for /f "delims=." %%v in ("%V8_VERSION%") do set V8_MAJOR=%%v
+          for /f "tokens=1,2 delims=." %%v in ("%V8_VERSION%") do (set V8_MAJOR=%%v& set V8_MINOR=%%w)
           if %V8_MAJOR% GEQ 15 (
             echo v8_enable_partition_alloc = false>> .\out.gn\arm64.release\args.gn
             echo v8_enable_temporal_support = false>> .\out.gn\arm64.release\args.gn
             echo enable_rust = false>> .\out.gn\arm64.release\args.gn
             echo v8_enable_fuzztest = false>> .\out.gn\arm64.release\args.gn
           )
+          rem Same reason as build_v8_windows_x86_64.yml: metagen's layout check
+          rem cannot represent ExtendedMap's deliberate 3-byte tail gap under the
+          rem MSVC STL, so take the Torque path instead. Flag exists from 15.7.
+          rem Remove these two lines together with the ones there.
+          if %V8_MAJOR% GTR 15 echo v8_use_metagen = false>> .\out.gn\arm64.release\args.gn
+          if %V8_MAJOR% EQU 15 if %V8_MINOR% GEQ 7 echo v8_use_metagen = false>> .\out.gn\arm64.release\args.gn
           echo _____build_____
           call ninja -C .\out.gn\arm64.release v8_monolith || exit /b 1
           echo _____results_____

@@ -68,28 +68,46 @@ The Linux x86_64 build of 15.6.75.19 was verified locally: `libv8_monolith.a`
 links with plain `g++ -std=c++20 ... -lv8_monolith -latomic` and the resulting
 program runs JavaScript and reports `V8 version: 15.6.75.19`.
 
-## Windows needs V8 15.7.112.1 or newer
+## Windows needs V8 15.7.112.1 or newer, plus `v8_use_metagen = false`
 
-15.6.75.19 builds on Linux and macOS but **cannot be built for Windows at all**,
-and no build setting changes that. The MSVC standard library implements
-`std::atomic<T>` with `alignas(sizeof(T))`, and under the Microsoft C++ ABI a
-required alignment cannot be lowered again by `#pragma pack`. V8's `Map` holds
-`std::atomic` bit fields, so the `pack(1)` `ExtendedMap` — which deliberately
-leaves `kTaggedSize - 1` bytes of tail padding for its subclasses — comes out 3
-bytes wider than the packed size Torque computed, while the base subobject is not
-rounded up and the subclass field still lands at the old offset. The generated
-layout assertions then fail during the build:
+The MSVC standard library implements `std::atomic<T>` with `alignas(sizeof(T))`,
+and under the Microsoft C++ ABI a required alignment cannot be lowered again by
+`#pragma pack`. V8's `Map` holds `std::atomic` bit fields, so the `pack(1)`
+`ExtendedMap` — which deliberately leaves `kTaggedSize - 1` bytes of tail padding
+for its subclasses — comes out 44 bytes wide while its fields stop at 41. Linux
+and macOS are unaffected because their standard library's atomics carry no such
+alignment requirement.
 
-```
-gen/torque-generated/src/objects/js-interceptor-map-tq.cc:
-  static_assert(kFlagsOffset == offsetof(JSInterceptorMap, flags_))
-  expression evaluates to '44 == 41'
-```
+The same mismatch bites in two places, and one V8 version bump does not cover
+both:
 
-Upstream fixed it in `99ebeac9c548e36f9e18658097df0b6c42b1c71c`, "[torque] Fix C++
-object layout assertions for MSVC STL" (2026-09-29, bug 531344950, also
-nodejs/node#65161), and the first V8 release branch carrying it is 15.7.112. That
-is why the default `v8_version` is `15.7.112.12` rather than `15.6.75.19`.
+1. **Torque's generated layout assertions.** Building 15.6.75.19 for Windows fails
+   with `static_assert(kFlagsOffset == offsetof(JSInterceptorMap, flags_))`
+   evaluating to `44 == 41`. Upstream fixed this in `99ebeac9c548e36f9e18658097df0b6c42b1c71c`,
+   "[torque] Fix C++ object layout assertions for MSVC STL" (bug 531344950, also
+   nodejs/node#65161); the first release branch carrying it is 15.7.112, which is
+   why the default `v8_version` is `15.7.112.12` rather than `15.6.75.19`.
+2. **Metagen's layout extraction.** From 15.7 metagen reads the object layout out
+   of the C++ headers with libclang, and it requires `sizeof(class)` to equal the
+   end of the class's fields, so it aborts on the same class:
+   `[metagen] layout extraction failed: v8::internal::ExtendedMap: fields end at
+   41, class size is 44`. That check is still strict on current upstream, and
+   `ExtendedMap` is unchanged through 15.9, so **no newer version fixes this**.
+   The Windows jobs therefore pass `v8_use_metagen = false`, which takes the old
+   Torque path — the one upstream's fix covers. This is a supported configuration,
+   not a workaround of our own: upstream keeps two bots on it
+   (`debug_x64_no_metagen` and `torque_compare` in `infra/mb/mb_config.pyl`), and
+   `BUILD.gn` asserts that `v8_verify_torque_generation_invariance` requires it.
+
+Both Windows jobs gate the flag on the version, because `v8_use_metagen` does not
+exist before 15.7 and gn rejects an assignment to an unknown argument.
+
+The flag is transitional and upstream intends to retire Torque's layout path
+eventually (`tools/metagen/metagen.py` carries a TODO to that effect). Remove the
+`v8_use_metagen = false` lines from both Windows jobs once metagen can represent
+the tail gap — either an annotation for fixed tail padding appears, or
+`ExtendedMap` stops leaving the 3 bytes. Until then, expect to re-check this on
+every V8 version bump.
 
 Going from 15.6 to 15.7 moves 8 files in `include/` (67 added, 22 removed lines),
 all of it additive — a new `DynamicScriptCompiledFromEmbedderCallback`, LA57
