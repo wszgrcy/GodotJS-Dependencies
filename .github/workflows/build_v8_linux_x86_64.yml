@@ -53,9 +53,11 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ninja-build generate-ninja pkg-config ca-certificates
 
-          # V8 15 uses std::atomic_ref, which needs libstdc++ from GCC 12 or newer.
-          # ubuntu-22.04 ships GCC 11. clang picks up the newest GCC installation it
-          # can find, so installing g++-13 next to the default compiler is enough.
+          # The host libstdc++ has to be GCC 12 or newer: libstdc++ only declares
+          # std::hardware_destructive_interference_size from GCC 12 onwards, and
+          # src/heap/mutable-page.cc uses it in a static_assert. ubuntu-22.04 ships
+          # GCC 11. clang picks up the newest GCC installation it can find, so
+          # installing g++-13 next to the default compiler is enough.
           if [ "${V8_VERSION%%.*}" -ge 15 ]; then
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-13
           fi

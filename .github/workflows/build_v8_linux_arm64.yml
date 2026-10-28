@@ -53,9 +53,12 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ninja-build generate-ninja pkg-config ca-certificates
 
-          # V8 15 uses std::atomic_ref, which needs libstdc++ from GCC 12 or newer.
-          # ubuntu-22.04 ships GCC 11. clang picks up the newest GCC installation it
-          # can find, so installing g++-13 next to the default compiler is enough.
+          # The host libstdc++ has to be GCC 12 or newer: libstdc++ only declares
+          # std::hardware_destructive_interference_size from GCC 12 onwards (checked
+          # against the libstdc++ headers of 11.4 / 12.3 / 13.2), and
+          # src/heap/mutable-page.cc uses it in a static_assert. ubuntu-22.04 ships
+          # GCC 11. clang picks up the newest GCC installation it can find, so
+          # installing g++-13 next to the default compiler is enough.
           if [ "${V8_VERSION%%.*}" -ge 15 ]; then
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-13
           fi
@@ -65,16 +68,25 @@ jobs:
           # is a cross build, so the host headers do not count: without these two
           # packages clang stops at '#include <memory>' in v8config.h, and metagen
           # stops at 'bits/libc-header-start.h'. The cross libstdc++ has to be
-          # GCC 12+ for the same reason the host one does, so prefer the versioned
-          # package and fall back to whatever the default cross g++ provides.
+          # GCC 12 or newer for the same reason the host one does: with GCC 11 the
+          # compile reaches src/heap/mutable-page.cc:53 and stops with
+          # "no member named 'hardware_destructive_interference_size' in namespace 'std'".
+          # ubuntu-22.04 has g++-12-aarch64-linux-gnu but not g++-13-aarch64-linux-gnu,
+          # and its unversioned g++-aarch64-linux-gnu is GCC 11, so try newest first
+          # and refuse to continue on something too old.
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libc6-dev-arm64-cross
-          if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-13-aarch64-linux-gnu; then
-            echo "installed g++-13-aarch64-linux-gnu"
-          else
-            echo "g++-13-aarch64-linux-gnu is not available here, using the default cross g++"
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-aarch64-linux-gnu
+          for gccver in 13 12 11; do
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "g++-${gccver}-aarch64-linux-gnu"; then
+              echo "installed g++-${gccver}-aarch64-linux-gnu"
+              break
+            fi
+          done
+          cross_gcc=$(ls -1 /usr/lib/gcc-cross/aarch64-linux-gnu 2>/dev/null | sort -V | tail -1 || true)
+          echo "newest cross GCC available for aarch64: ${cross_gcc:-none}"
+          if [ -z "$cross_gcc" ] || [ "${cross_gcc%%.*}" -lt 12 ]; then
+            echo "::error::cross libstdc++ is GCC '${cross_gcc:-none}', V8 15 needs 12 or newer"
+            exit 1
           fi
-          ls -d /usr/lib/gcc-cross/aarch64-linux-gnu/* /usr/aarch64-linux-gnu/include/c++/*
 
           cd $GITHUB_WORKSPACE
           if [ ! -d "$GITHUB_WORKSPACE/depot_tools" ]; then
