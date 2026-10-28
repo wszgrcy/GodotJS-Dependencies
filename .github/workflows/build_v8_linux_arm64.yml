@@ -121,6 +121,33 @@ jobs:
           cp $GITHUB_WORKSPACE/Scripts/v8.linux_arm64.args.gn $GITHUB_WORKSPACE/v8/v8/out.gn/arm64.release/args.gn
           bash $GITHUB_WORKSPACE/Scripts/prepare_v8_build.sh $GITHUB_WORKSPACE/v8/v8 $GITHUB_WORKSPACE/v8/v8/out.gn/arm64.release/args.gn "$V8_VERSION"
           ls -l $GITHUB_WORKSPACE/v8/v8/out.gn/arm64.release/
+
+          # The apt step above only proves a new enough cross libstdc++ is installed.
+          # This checks the one this exact clang with this exact target actually picks,
+          # which is the thing that decides whether the compile works. Without it a
+          # mismatch only shows up 40 minutes in, at src/heap/mutable-page.cc.
+          cat > /tmp/v8_arm64_libcxx_probe.cc <<'CC'
+          #include <new>
+          #include <version>
+
+          #ifndef __cpp_lib_hardware_interference_size
+          #error "the libstdc++ this clang resolves to is too old (needs GCC 12+)"
+          #endif
+
+          alignas(std::hardware_destructive_interference_size) static int padded_field;
+          int main() { return padded_field; }
+          CC
+          clangxx="$GITHUB_WORKSPACE/v8/v8/third_party/llvm-build/Release+Asserts/bin/clang++"
+          echo "libstdc++ search path clang uses for --target=aarch64-linux-gnu:"
+          "$clangxx" --target=aarch64-linux-gnu -std=c++20 -v -E -x c++ /dev/null 2>&1 \
+            | sed -n '/search starts here/,/End of search list/p' | grep 'include/c++' || true
+          if ! "$clangxx" --target=aarch64-linux-gnu -std=c++20 -fsyntax-only /tmp/v8_arm64_libcxx_probe.cc; then
+            echo "::error::clang resolves --target=aarch64-linux-gnu to a libstdc++ that is too old for V8 ${V8_VERSION}"
+            echo "the search path printed above shows which version it picked; see the apt step for what was installed."
+            exit 1
+          fi
+          echo "cross libstdc++ preflight passed"
+
           ninja -C ./out.gn/arm64.release v8_monolith
 
           cd $GITHUB_WORKSPACE
