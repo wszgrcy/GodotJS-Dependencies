@@ -28,7 +28,12 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           git clone https://libwebsockets.org/repo/libwebsockets
           cd libwebsockets
-          git checkout v4.3-stable
+          # Pinned to a tag on purpose: the branch moves, and the tip of
+          # v4.3-stable (3df0148, "pollfd: narrow vpt declaration guard to
+          # exclude FreeRTOS / Windows") dropped the vpt declaration that
+          # pollfd.c still uses on Windows, so MSVC could no longer build it.
+          # v4.3.10 is the last commit before that change.
+          git checkout v4.3.10
 
       - name: Build lws (x86_64)
         run: |
