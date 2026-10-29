@@ -7,6 +7,27 @@ Workflows to build all dependencies of GodotJS (v8 and libwebsockets).
 - https://github.com/actions/create-release
 
 
+## V8 versions
+
+The default is **12.6.228.49**: the last V8 release an embedder can still compile
+against as C++17. `12.7.224.1` added `#error "C++20 or later required."` to
+`include/v8config.h`, and Godot compiles its modules with `-std=gnu++17`, so
+anything from 12.7 up forces the module onto C++20.
+
+| V8 | Minimum C++ standard for the embedder |
+|---|---|
+| up to `12.6.228.49` | C++17 |
+| from `12.7.224.1` | C++20 |
+
+
+## Bundle contents
+
+`v8_<version>.zip` contains `v8/include/` plus one `v8/<platform>.<arch>.release/`
+directory per platform. The headers are copied by the Linux x86_64 job: they are
+identical for every platform, and that is the one job `publish` can never skip
+(`vars.SKIP_WINDOWS` and `vars.SKIP_APPLE` can skip the others).
+
+
 ## Windows Toolset
 
 Different Visual C++ Compilers are involved in different prebuilt GodotJS dependency releases:

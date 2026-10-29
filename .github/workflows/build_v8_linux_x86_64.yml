@@ -89,6 +89,11 @@ jobs:
           mkdir -p staging/v8/linux.x86_64.release
           cp $GITHUB_WORKSPACE/v8/v8/out.gn/x64.release/obj/libv8_monolith.a staging/v8/linux.x86_64.release/
 
+          # The headers come from this job. They are the same for every platform,
+          # and unlike the Windows jobs this one can never be skipped by
+          # vars.SKIP_WINDOWS, so a published bundle always has them.
+          cp -r $GITHUB_WORKSPACE/v8/v8/include staging/v8/include
+
       - name: Upload
         if: ${{ env.IS_ACT != 'true' || env.ACTIONS_RUNTIME_URL != '' }}
         uses: actions/upload-artifact@v4

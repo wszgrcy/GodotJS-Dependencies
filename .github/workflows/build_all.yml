@@ -11,11 +11,12 @@ on:
         description: 'v8 version tag'
         type: choice
         options:
+          - "12.6.228.49" # last release that still builds as a C++17 embedder
           - "13.5.119"
           - "12.9.202.28" # 2022
           - "12.4.254.21" # 2019
         required: true
-        default: "13.5.119"
+        default: "12.6.228.49"
 
 jobs:
   v8_android_arm64:
