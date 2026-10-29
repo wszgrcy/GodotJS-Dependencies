@@ -74,6 +74,17 @@ jobs:
             exit 1
           }
 
+          # //build has to land on the revision this V8 tag pins. A newer //build
+          # renamed exec_script_whitelist to exec_script_allowlist, and then gn gen
+          # fails inside //.gn with a message that says nothing about the version
+          # mismatch, so report the real problem here instead.
+          BUILD_PIN=$(gclient getdep -r build --deps-file=$GITHUB_WORKSPACE/v8/v8/DEPS)
+          BUILD_HEAD=$(git -C $GITHUB_WORKSPACE/v8/v8/build rev-parse HEAD)
+          if [ "$BUILD_HEAD" != "$BUILD_PIN" ]; then
+            echo "gclient sync did not process the tag's DEPS: //build is at $BUILD_HEAD, expected $BUILD_PIN"
+            exit 1
+          fi
+
       - name: Build v8 ios-arm64
         run: |
           export PATH=$GITHUB_WORKSPACE/depot_tools:$PATH
