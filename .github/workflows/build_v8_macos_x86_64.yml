@@ -50,7 +50,27 @@ jobs:
           cd v8
           git fetch origin refs/tags/${{ env.V8_VERSION }}
           git checkout FETCH_HEAD
+
+          # The vpython3_common sync hook cannot succeed for older V8 versions on
+          # an Apple Silicon runner: their .vpython3 spec pins python 3.8, and the
+          # Chromium package index no longer serves numpy==1.21.1+supported.1 for
+          # cp38/macos-arm64 (crbug.com/492362903). That hook only pre-builds a
+          # python virtualenv, and nothing in a v8_monolith build runs through
+          # vpython3, so shadow it for this step only. Every other hook - clang
+          # toolchain, LASTCHANGE, dsymutil - still runs normally.
+          mkdir -p $GITHUB_WORKSPACE/hook-shim
+          printf '#!/bin/sh\necho "[shim] skipping vpython3"\nexit 0\n' > $GITHUB_WORKSPACE/hook-shim/vpython3
+          chmod +x $GITHUB_WORKSPACE/hook-shim/vpython3
+          export PATH=$GITHUB_WORKSPACE/hook-shim:$PATH
+
           gclient sync -D --force --reset
+
+          # Stop here, with a clear message, if the sync left out what the build
+          # actually needs.
+          test -x $GITHUB_WORKSPACE/v8/v8/third_party/llvm-build/Release+Asserts/bin/clang || {
+            echo "clang toolchain is missing after gclient sync"
+            exit 1
+          }
 
       - name: Build v8 x86_64
         run: |
