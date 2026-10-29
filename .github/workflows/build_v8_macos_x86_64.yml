@@ -51,18 +51,19 @@ jobs:
           git fetch origin refs/tags/${{ env.V8_VERSION }}
           git checkout FETCH_HEAD
 
-          # The vpython3_common sync hook cannot succeed for older V8 versions on
-          # an Apple Silicon runner: their .vpython3 spec pins python 3.8, and the
-          # Chromium package index no longer serves numpy==1.21.1+supported.1 for
-          # cp38/macos-arm64 (crbug.com/492362903). That hook only pre-builds a
-          # python virtualenv, and nothing in a v8_monolith build runs through
-          # vpython3, so shadow it for this step only. Every other hook - clang
-          # toolchain, LASTCHANGE, dsymutil - still runs normally.
-          mkdir -p $GITHUB_WORKSPACE/hook-shim
-          printf '#!/bin/sh\necho "[shim] skipping vpython3"\nexit 0\n' > $GITHUB_WORKSPACE/hook-shim/vpython3
-          chmod +x $GITHUB_WORKSPACE/hook-shim/vpython3
-          export PATH=$GITHUB_WORKSPACE/hook-shim:$PATH
-
+          # The vpython3_common hook can never finish here: V8 12.x pins python 3.8
+          # in .vpython3, and the Chromium package index no longer serves
+          # numpy==1.21.1+supported.1 for cp38/macos-arm64 (crbug.com/492362903).
+          # The hook only pre-builds a python virtualenv, and nothing in a
+          # v8_monolith build is launched through vpython3 - in the build files
+          # .vpython3 appears only as `data = [".vpython3"]` on test targets.
+          # Dropping one named hook is what .gclient's custom_hooks is for: a
+          # custom hook without an action replaces the DEPS hook of that name and
+          # runs nothing. Every other hook - clang toolchain, LASTCHANGE, dsymutil
+          # - still runs.
+          cd $GITHUB_WORKSPACE/v8
+          gclient config --spec "solutions = [{'name': 'v8', 'url': 'https://chromium.googlesource.com/v8/v8.git', 'deps_file': 'DEPS', 'custom_deps': {}, 'custom_hooks': [{'name': 'vpython3_common', 'pattern': '.'}]}]"
+          cd v8
           gclient sync -D --force --reset
 
           # Stop here, with a clear message, if the sync left out what the build
@@ -76,7 +77,8 @@ jobs:
         run: |
           export PATH=$GITHUB_WORKSPACE/depot_tools:$PATH
           cd $GITHUB_WORKSPACE/v8/v8
-          python ./tools/dev/v8gen.py x64.release
+          # -vv makes v8gen print the output of the command it fails on.
+          python ./tools/dev/v8gen.py -vv x64.release
           cp $GITHUB_WORKSPACE/Scripts/v8.macos_x86_64.args.gn $GITHUB_WORKSPACE/v8/v8/out.gn/x64.release/args.gn
           ls -l $GITHUB_WORKSPACE/depot_tools/ninja 
           ls -l $GITHUB_WORKSPACE/depot_tools/autoninja 
