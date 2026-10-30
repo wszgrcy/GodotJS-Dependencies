@@ -80,7 +80,7 @@ jobs:
           set PATH=%GITHUB_WORKSPACE%\depot_tools;%PATH%
           set DEPOT_TOOLS_WIN_TOOLCHAIN=0
           echo _____ninja_____ dont know why v8gen.py cant properly generate files we want
-          call gn gen .\out.gn\arm64.release -args="is_component_build=false is_debug=false target_cpu=""arm64"" target_os=""win"" v8_enable_i18n_support=false v8_monolithic=true v8_use_external_startup_data=false v8_enable_pointer_compression=true v8_jitless=false use_custom_libcxx=false treat_warnings_as_errors=false v8_symbol_level=0 v8_enable_sandbox=false"
+          call gn gen .\out.gn\arm64.release -args="is_component_build=false is_debug=false target_cpu=""arm64"" target_os=""win"" v8_enable_i18n_support=true v8_monolithic=true v8_use_external_startup_data=false v8_enable_pointer_compression=true v8_jitless=false use_custom_libcxx=false treat_warnings_as_errors=false v8_symbol_level=0 v8_enable_sandbox=false"
           echo _____list_____
           dir .\out.gn\arm64.release
           more .\out.gn\arm64.release\args.gn
