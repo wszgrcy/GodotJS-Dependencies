@@ -91,6 +91,12 @@ jobs:
           mkdir staging\v8\windows_x86_64_release
           copy %GITHUB_WORKSPACE%\v8\v8\out.gn\x64.release\obj\v8_monolith.lib staging\v8\windows_x86_64_release\v8_monolith.lib /Y /B
 
+          rem ICU is built with its data in a separate file, so the monolith does not carry it.
+          rem GodotJS loads icudtl.dat from next to the executable at runtime (Intl.*, Date.prototype.toLocale*).
+          rem cmd does not stop on a failed command, so verify the file really landed.
+          copy %GITHUB_WORKSPACE%\v8\v8\third_party\icu\common\icudtl.dat staging\v8\windows_x86_64_release\icudtl.dat /Y /B
+          if not exist staging\v8\windows_x86_64_release\icudtl.dat exit /b 1
+
       - name: Upload
         if: ${{ env.IS_ACT != 'true' || env.ACTIONS_RUNTIME_URL != '' }}
         uses: actions/upload-artifact@v4

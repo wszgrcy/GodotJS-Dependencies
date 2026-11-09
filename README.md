@@ -27,6 +27,14 @@ directory per platform. The headers are copied by the Linux x86_64 job: they are
 identical for every platform, and that is the one job `publish` can never skip
 (`vars.SKIP_WINDOWS` and `vars.SKIP_APPLE` can skip the others).
 
+Each platform directory also carries `icudtl.dat`. ICU is built with
+`icu_use_data_file = true`, so its language resources live in that file instead of
+inside the monolith: without it `Intl.*` is broken and
+`Date.prototype.toLocaleDateString` aborts the process. GodotJS loads the file at
+startup from next to the executable, or from the path in `GODOTJS_ICU_DATA`. It is
+taken from the V8 checkout: `third_party/icu/common/` on desktop, and
+`third_party/icu/android/` / `third_party/icu/ios/` on mobile (about 10 / 9 / 6 MB).
+
 
 ## Windows Toolset
 

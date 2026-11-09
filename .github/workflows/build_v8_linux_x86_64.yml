@@ -89,6 +89,11 @@ jobs:
           mkdir -p staging/v8/linux.x86_64.release
           cp $GITHUB_WORKSPACE/v8/v8/out.gn/x64.release/obj/libv8_monolith.a staging/v8/linux.x86_64.release/
 
+          # ICU is built with its data in a separate file, so the monolith does not carry it.
+          # GodotJS loads icudtl.dat from next to the executable at runtime (Intl.*, Date.prototype.toLocale*).
+          cp $GITHUB_WORKSPACE/v8/v8/third_party/icu/common/icudtl.dat staging/v8/linux.x86_64.release/
+          test -f staging/v8/linux.x86_64.release/icudtl.dat
+
           # The headers come from this job. They are the same for every platform,
           # and unlike the Windows jobs this one can never be skipped by
           # vars.SKIP_WINDOWS, so a published bundle always has them.

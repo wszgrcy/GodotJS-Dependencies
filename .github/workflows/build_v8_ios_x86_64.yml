@@ -101,6 +101,12 @@ jobs:
           mkdir -p staging/v8/ios.x86_64.release
           cp $GITHUB_WORKSPACE/v8/v8/out.gn/x64.release/obj/libv8_monolith.a staging/v8/ios.x86_64.release/
 
+          # ICU is built with its data in a separate file, so the monolith does not carry it.
+          # GodotJS loads icudtl.dat at runtime (Intl.*, Date.prototype.toLocale*): next to the
+          # executable, or wherever GODOTJS_ICU_DATA points.
+          cp $GITHUB_WORKSPACE/v8/v8/third_party/icu/ios/icudtl.dat staging/v8/ios.x86_64.release/
+          test -f staging/v8/ios.x86_64.release/icudtl.dat
+
       - name: Upload
         if: ${{ env.IS_ACT != 'true' || env.ACTIONS_RUNTIME_URL != '' }}
         uses: actions/upload-artifact@v4
