@@ -3,3 +3,5 @@
 .DS_Store
 
 /dist/
+# 本地把旧的 dist/ 改名封存（留着会让它静默顶掉 release 下载），里面的 zip 不提交
+/dist.sealed-oct28/
