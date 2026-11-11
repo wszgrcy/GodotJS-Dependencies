@@ -102,9 +102,10 @@ Two things to know when embedding a 15.x build:
   `__atomic_compare_exchange` instead of a `cmpxchg16b` instruction, and that
   function lives in libatomic. A 12.x library has no such reference.
 
-The Linux x86_64 build of 15.6.75.19 was verified locally: `libv8_monolith.a`
-links with plain `g++ -std=c++20 ... -lv8_monolith -latomic` and the resulting
-program runs JavaScript and reports `V8 version: 15.6.75.19`.
+The Linux x86_64 build of 15.7.112.12 was verified locally with ICU on:
+`libv8_monolith.a` links with plain `g++ -std=c++20 ... -lv8_monolith -latomic`, and
+the resulting program runs JavaScript, `Intl.NumberFormat`, `toLocaleDateString`
+and a `\p{Script=Han}` regex. See [docs/v8-15.md](docs/v8-15.md).
 
 ## Windows needs V8 15.7.112.1 or newer, plus `v8_use_metagen = false`
 
