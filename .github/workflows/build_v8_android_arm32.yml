@@ -107,6 +107,7 @@ jobs:
           python ./build/linux/sysroot_scripts/install-sysroot.py --arch=arm
           python ./tools/dev/v8gen.py arm.release
           cp $GITHUB_WORKSPACE/Scripts/v8.android_arm32.args.gn $GITHUB_WORKSPACE/v8/v8/out.gn/arm.release/args.gn
+          bash $GITHUB_WORKSPACE/Scripts/prepare_v8_build.sh $GITHUB_WORKSPACE/v8/v8 $GITHUB_WORKSPACE/v8/v8/out.gn/arm.release/args.gn "$V8_VERSION"
           cat $GITHUB_WORKSPACE/v8/v8/out.gn/arm.release/args.gn
           ninja -C ./out.gn/arm.release v8_monolith
 

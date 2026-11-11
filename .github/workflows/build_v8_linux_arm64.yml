@@ -53,6 +53,41 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ninja-build generate-ninja pkg-config ca-certificates
 
+          # The host libstdc++ has to be GCC 12 or newer: libstdc++ only declares
+          # std::hardware_destructive_interference_size from GCC 12 onwards (checked
+          # against the libstdc++ headers of 11.4 / 12.3 / 13.2), and
+          # src/heap/mutable-page.cc uses it in a static_assert. ubuntu-22.04 ships
+          # GCC 11. clang picks up the newest GCC installation it can find, so
+          # installing g++-13 next to the default compiler is enough.
+          if [ "${V8_VERSION%%.*}" -ge 15 ]; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-13
+          fi
+
+          # args.gn sets use_sysroot=false, so a --target=aarch64-linux-gnu compile
+          # has to find an arm64 C library and libstdc++ on the runner itself. This
+          # is a cross build, so the host headers do not count: without these two
+          # packages clang stops at '#include <memory>' in v8config.h, and metagen
+          # stops at 'bits/libc-header-start.h'. The cross libstdc++ has to be
+          # GCC 12 or newer for the same reason the host one does: with GCC 11 the
+          # compile reaches src/heap/mutable-page.cc:53 and stops with
+          # "no member named 'hardware_destructive_interference_size' in namespace 'std'".
+          # ubuntu-22.04 has g++-12-aarch64-linux-gnu but not g++-13-aarch64-linux-gnu,
+          # and its unversioned g++-aarch64-linux-gnu is GCC 11, so try newest first
+          # and refuse to continue on something too old.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libc6-dev-arm64-cross
+          for gccver in 13 12 11; do
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "g++-${gccver}-aarch64-linux-gnu"; then
+              echo "installed g++-${gccver}-aarch64-linux-gnu"
+              break
+            fi
+          done
+          cross_gcc=$(ls -1 /usr/lib/gcc-cross/aarch64-linux-gnu 2>/dev/null | sort -V | tail -1 || true)
+          echo "newest cross GCC available for aarch64: ${cross_gcc:-none}"
+          if [ -z "$cross_gcc" ] || [ "${cross_gcc%%.*}" -lt 12 ]; then
+            echo "::error::cross libstdc++ is GCC '${cross_gcc:-none}', V8 15 needs 12 or newer"
+            exit 1
+          fi
+
           cd $GITHUB_WORKSPACE
           if [ ! -d "$GITHUB_WORKSPACE/depot_tools" ]; then
             git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
@@ -84,7 +119,35 @@ jobs:
           python ./build/linux/sysroot_scripts/install-sysroot.py --arch=arm64
           python ./tools/dev/v8gen.py arm64.release
           cp $GITHUB_WORKSPACE/Scripts/v8.linux_arm64.args.gn $GITHUB_WORKSPACE/v8/v8/out.gn/arm64.release/args.gn
+          bash $GITHUB_WORKSPACE/Scripts/prepare_v8_build.sh $GITHUB_WORKSPACE/v8/v8 $GITHUB_WORKSPACE/v8/v8/out.gn/arm64.release/args.gn "$V8_VERSION"
           ls -l $GITHUB_WORKSPACE/v8/v8/out.gn/arm64.release/
+
+          # The apt step above only proves a new enough cross libstdc++ is installed.
+          # This checks the one this exact clang with this exact target actually picks,
+          # which is the thing that decides whether the compile works. Without it a
+          # mismatch only shows up 40 minutes in, at src/heap/mutable-page.cc.
+          cat > /tmp/v8_arm64_libcxx_probe.cc <<'CC'
+          #include <new>
+          #include <version>
+
+          #ifndef __cpp_lib_hardware_interference_size
+          #error "the libstdc++ this clang resolves to is too old (needs GCC 12+)"
+          #endif
+
+          alignas(std::hardware_destructive_interference_size) static int padded_field;
+          int main() { return padded_field; }
+          CC
+          clangxx="$GITHUB_WORKSPACE/v8/v8/third_party/llvm-build/Release+Asserts/bin/clang++"
+          echo "libstdc++ search path clang uses for --target=aarch64-linux-gnu:"
+          "$clangxx" --target=aarch64-linux-gnu -std=c++20 -v -E -x c++ /dev/null 2>&1 \
+            | sed -n '/search starts here/,/End of search list/p' | grep 'include/c++' || true
+          if ! "$clangxx" --target=aarch64-linux-gnu -std=c++20 -fsyntax-only /tmp/v8_arm64_libcxx_probe.cc; then
+            echo "::error::clang resolves --target=aarch64-linux-gnu to a libstdc++ that is too old for V8 ${V8_VERSION}"
+            echo "the search path printed above shows which version it picked; see the apt step for what was installed."
+            exit 1
+          fi
+          echo "cross libstdc++ preflight passed"
+
           ninja -C ./out.gn/arm64.release v8_monolith
 
           cd $GITHUB_WORKSPACE
