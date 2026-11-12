@@ -64,9 +64,13 @@ jobs:
             ninja-build generate-ninja pkg-config zip unzip ca-certificates
 
           cd $GITHUB_WORKSPACE
-          # NDK 版本必须跟引擎一致：Godot 4.7 硬要求 29.0.14206865（= r29）。
-          # 用旧 NDK 编出来的静态库会引用旧 libc++ 的出库符号（如
-          # std::__ndk1::__hash_memory），新 libc++ 已经不再提供，引擎链接时会报 undefined symbol。
+          # 提醒：下面三个 default_android_ndk_* 参数在 V8 15 里已经不是已声明的 gn 参数了，
+          # gn 只会警告一句、不会生效。V8 的 Android 编译器实际用 DEPS 里 CIPD 装的
+          # third_party/android_toolchain/ndk（15.7 钉的是 r30），而 android_ndk_root 在
+          # build/config/android/config.gni 里是普通赋值，args.gn 改不动它。
+          # 所以产物用的是 r30 的 libc++，比 Godot 4.7 要求的 r29 新一个大版本，多出的
+          # std::__ndk1::__hash_memory 引用由引擎侧补符号解决：
+          # GodotJS/impl/v8/jsb_libcxx_hash_compat.cpp
           if [ ! -d "$GITHUB_WORKSPACE/android-ndk-r29" ]; then
             wget -O android-ndk.zip -q https://dl.google.com/android/repository/android-ndk-r29-linux.zip
             unzip -q android-ndk.zip
