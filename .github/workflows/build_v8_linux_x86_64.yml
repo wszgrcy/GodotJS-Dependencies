@@ -15,7 +15,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       V8_VERSION: ${{ inputs.v8_version || github.event.inputs.v8_version }}
 
@@ -53,13 +53,21 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ninja-build generate-ninja pkg-config ca-certificates
 
-          # The host libstdc++ has to be GCC 12 or newer: libstdc++ only declares
-          # std::hardware_destructive_interference_size from GCC 12 onwards, and
-          # src/heap/mutable-page.cc uses it in a static_assert. ubuntu-22.04 ships
-          # GCC 11. clang picks up the newest GCC installation it can find, so
-          # installing g++-13 next to the default compiler is enough.
-          if [ "${V8_VERSION%%.*}" -ge 15 ]; then
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-13
+          # The host libstdc++ has to come from GCC 14 or newer. Two separate
+          # things in the source depend on it:
+          #   - std::hardware_destructive_interference_size, used by a static_assert
+          #     in src/heap/mutable-page.cc, is only declared from GCC 12.
+          #   - std::powl, called by src/objects/js-duration-format.cc, is only
+          #     declared from GCC 14. Measured on that exact call with the four
+          #     compiler generations: g++-12 and g++-13 fail with "no member named
+          #     'powl' in namespace 'std'", g++-14 and g++-15 compile it.
+          # ubuntu-24.04 ships GCC 13 by default, so g++-14 goes in next to it and
+          # clang picks up the newest GCC installation it can find (no cc/cxx
+          # arguments needed). What the newer image costs is the C library floor:
+          # use_sysroot=false makes the runner's glibc (2.39 here) the floor of the
+          # archives, where ubuntu-22.04 gave 2.35.
+          if [ "${V8_VERSION%%.*}" -ge 14 ]; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-14
           fi
 
           cd $GITHUB_WORKSPACE

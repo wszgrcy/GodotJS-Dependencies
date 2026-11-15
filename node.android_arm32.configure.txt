@@ -1,0 +1,27 @@
+# Node.js configure arguments: Android arm32 / armv7 (builds libnode for android.arm32)
+
+# Cross build: ./configure only knows *what* to target, the compiler comes from the
+# environment, which is all gyp reads (tools/gyp ninja.py):
+#   CC_target, CXX_target, AR_target, NM_target, READELF_target
+# For this target those are the NDK wrappers
+#   $NDK/toolchains/llvm/prebuilt/<host>/bin/armv7a-linux-androideabi<api>-clang[-++]
+# prepare_node_build.sh refuses to continue when they are missing.
+
+# Node 26 removed tools/android_configure.py, so ./android-configure imports a
+# module that is not there; set the variables above and call ./configure directly.
+
+# When --dest-os=android and --dest-cpu=arm are combined, configure.py forces
+# arm_version 7 and arm_fpu vfpv3 (it does that itself, around the
+# "if options.dest_os == 'android'" line in configure.py), so there is nothing to
+# pass here for the FPU.
+
+# Not verified: GodotJS ships an android.arm32 V8 build today, but nobody has run
+# a Node build for 32-bit Android here. If it fails, this is the first entry to
+# drop - arm64 and x86_64 are the ones that matter.
+--ninja
+--dest-os=android
+--dest-cpu=arm
+--with-intl=full-icu
+--without-node-options
+--without-npm
+--disable-single-executable-application

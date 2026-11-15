@@ -1,0 +1,11 @@
+# ./configure arguments for Node.js on macOS x86_64 (Intel).
+# See node.linux_x86_64.configure.txt for what the shared options do.
+
+--ninja
+--dest-os=mac
+--dest-cpu=x64
+
+--with-intl=full-icu
+--without-node-options
+--without-npm
+--disable-single-executable-application

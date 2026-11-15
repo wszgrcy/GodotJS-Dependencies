@@ -5,3 +5,6 @@
 /dist/
 # 本地把旧的 dist/ 改名封存（留着会让它静默顶掉 release 下载），里面的 zip 不提交
 /dist.sealed-oct28/
+/*.log
+# tools/local_node_job_check.sh 的本地工作目录（解包源码与构建产物）
+/.local/

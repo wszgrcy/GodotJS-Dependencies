@@ -1,0 +1,21 @@
+# Node.js configure arguments: Android x86_64 (builds libnode for android.x86_64)
+
+# Cross build: ./configure only knows *what* to target, the compiler comes from the
+# environment, which is all gyp reads (tools/gyp ninja.py):
+#   CC_target, CXX_target, AR_target, NM_target, READELF_target
+# For this target those are the NDK wrappers
+#   $NDK/toolchains/llvm/prebuilt/<host>/bin/x86_64-linux-android<api>-clang[-++]
+# prepare_node_build.sh refuses to continue when they are missing.
+
+# Node 26 removed tools/android_configure.py, so ./android-configure imports a
+# module that is not there; set the variables above and call ./configure directly.
+
+# This is the target an Android emulator on a desktop CI machine runs, so it is the
+# cheapest one to actually execute a bundle check on (adb, given a device).
+--ninja
+--dest-os=android
+--dest-cpu=x64
+--with-intl=full-icu
+--without-node-options
+--without-npm
+--disable-single-executable-application

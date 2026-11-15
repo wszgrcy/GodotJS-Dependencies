@@ -1,0 +1,18 @@
+# ./configure arguments for Node.js on Linux arm64.
+# See node.linux_x86_64.configure.txt for what the shared options do.
+#
+# This file assumes the job runs on an arm64 runner, so no cross-compilation
+# flags are needed and Node can run its own mksnapshot to build the V8 snapshot.
+# Cross-building from x86_64 instead works too -- add --cross-compiling and point
+# CC/CXX at aarch64-linux-gnu-g++/gcc -- but the snapshot step then has to run the
+# arm64 mksnapshot through qemu-user (binfmt), which is slower to set up and to
+# debug.
+
+--ninja
+--dest-os=linux
+--dest-cpu=arm64
+
+--with-intl=full-icu
+--without-node-options
+--without-npm
+--disable-single-executable-application

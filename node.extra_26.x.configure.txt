@@ -1,0 +1,33 @@
+# Extra ./configure arguments for Node.js 26.x only.
+#
+# prepare_node_build.sh appends this file to node.<platform>_<arch>.configure.txt
+# when the Node version being built has major version 26. They cannot live in the
+# per-platform files because ./configure rejects an option it does not declare,
+# and this option does not exist in Node 22 or Node 24 (checked against
+# v22.23.5 and v24.22.3):
+#
+#   --without-lief   Node 26 added liblief as a dependency for the Single
+#                    Executable Application tooling. --disable-single-executable-application
+#                    already turns it off; this makes it explicit, and also keeps
+#                    liblief.a out of the archive list if SEA is ever re-enabled.
+#
+# Options that exist from 22.23.5 / 24.22.3 upwards and are therefore safe to put
+# in the per-platform files: --without-node-options,
+# --disable-single-executable-application.
+#
+# Two switches are deliberately left at Node's default instead of being turned
+# off: --without-amaro (Node's TypeScript stripper) and --without-sqlite. Neither
+# changes what an embedder links against, and keeping Node's default feature set
+# means the archives behave like the ones Node ships. The build needs no Rust
+# toolchain: Node 26's V8 is configured with v8_enable_temporal_support = 0 by
+# default, which is the only thing that would have pulled Rust in.
+#
+# Node 26 is the current Active LTS ("Lithium", EOL April 2029) and ships V8
+# 14.6.202.34. That is lower than the V8 15.7 GodotJS pins, and that is accepted:
+# the point of this bundle is Node itself, not a particular V8 version.
+# If another major is ever added here, check its headers for the tagged
+# Context::SetAlignedPointerInEmbedderData overload GodotJS uses in ~50 places.
+# Node 24 (V8 13.6) was checked and does not have it, which is the concrete reason
+# 24 is not a target — not the version number on its own.
+
+--without-lief

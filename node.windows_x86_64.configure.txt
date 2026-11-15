@@ -1,0 +1,28 @@
+# ./configure arguments for Node.js on Windows x86_64.
+# See node.linux_x86_64.configure.txt for what the shared options do.
+#
+# ./configure has to run inside a "x64 Native Tools Command Prompt" environment
+# (the jobs call vcvars64 first); it only records the toolchain, cl.exe does the
+# work. Node's static build uses /MT, which is what Godot already links against,
+# so nothing has to be aligned here.
+
+--ninja
+--dest-cpu=x64
+# Node calls Windows "win"; naming the target keeps the file honest
+# about what it cross-compiles to when a runner differs.
+--dest-os=win
+
+--with-intl=full-icu
+--without-node-options
+--without-npm
+--disable-single-executable-application
+
+# Node 24 and newer are built on Windows with clang-cl instead of cl.exe
+# (BUILDING.md calls it a requirement), and the option carries the LLVM version:
+# ./configure --clang-cl=19.1.5. A bare --clang-cl stops configure with
+# "argument --clang-cl: expected one argument".
+#
+# The version is a property of the machine, not of this file, so the option is not
+# written here: the CI job reads `clang-cl --version` - the same thing Node's own
+# vcbuild.bat does - and appends --clang-cl=<version> to the arguments. Building by
+# hand on Windows means adding that option yourself, with the version you have.

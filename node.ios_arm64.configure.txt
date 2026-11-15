@@ -1,0 +1,36 @@
+# Node.js configure arguments: iOS arm64 (builds libnode for ios.arm64)
+
+# This one is code-complete but never compiled. Three concrete obstacles were found
+# by reading Node 26's own build machinery and gode's shipped library layout; each
+# is stated with the file it comes from so the next person does not re-derive them.
+#
+#   1. gyp has no "ios" flavour. Node passes --dest-os straight through as gyp's
+#      flavour (configure.py, near the end: flavor_params['flavor'] = options.dest_os),
+#      and the ninja generator only special-cases "win" and "mac". So with
+#      --dest-os=ios you get neither the xcode emulation (no -isysroot, no framework
+#      handling, no libtool wrapper) nor a documented path. The toolchain therefore
+#      has to arrive as wrapper compilers through CC_target/CXX_target/AR_target/
+#      NM_target/READELF_target, with -target arm64-apple-ios<version> and
+#      -isysroot $(xcrun --sdk iphoneos --show-sdk-path) baked into the wrapper.
+#      build_node.yml writes those wrappers.
+#   2. Parts of the source tree are ready: deps/cares/cares.gyp, deps/zlib/zlib.gyp
+#      and tools/v8_gypfiles/toolchain.gypi contain OS=="ios" conditions, so the
+#      dependencies know about iOS even though Node's documentation does not.
+#   3. iOS does not allow executable memory, so V8 cannot JIT. A Node bundle for iOS
+#      is only useful to an embedder that starts it without JIT; that is an
+#      engine-side decision (what flags to pass), not something the archive can
+#      record for you. gode links its iOS libnode with -framework Foundation
+#      (gode CMakeLists, the ios branch), which is what link.txt has to end up with.
+#
+# Third-party proof that this is reachable: moluopro/libnode publishes ios/arm64
+# libnode.a (and android/arm64) and gode 2.4.8 ships both in its plugin. Their
+# build scripts live in a private Node fork (moluopro/nodejs), so the arguments
+# above are ours, not copied.
+
+--ninja
+--dest-os=ios
+--dest-cpu=arm64
+--with-intl=full-icu
+--without-node-options
+--without-npm
+--disable-single-executable-application

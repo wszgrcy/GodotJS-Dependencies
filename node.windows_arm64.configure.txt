@@ -1,0 +1,28 @@
+# ./configure arguments for Node.js on Windows arm64.
+# See node.linux_x86_64.configure.txt for what the shared options do.
+#
+# Run configure from the "VS 2022 ARM64 Native Tools Command Prompt" (the job
+# calls the vcvars script for the amd64_arm64 host/target pair). Node's own
+# docs treat Windows/arm64 as supported, but this is the least exercised
+# combination here; see docs/node-26.md.
+
+--ninja
+--dest-cpu=arm64
+# Node calls Windows "win"; naming the target keeps the file honest
+# about what it cross-compiles to when a runner differs.
+--dest-os=win
+
+--with-intl=full-icu
+--without-node-options
+--without-npm
+--disable-single-executable-application
+
+# Node 24 and newer are built on Windows with clang-cl instead of cl.exe
+# (BUILDING.md calls it a requirement), and the option carries the LLVM version:
+# ./configure --clang-cl=19.1.5. A bare --clang-cl stops configure with
+# "argument --clang-cl: expected one argument".
+#
+# The version is a property of the machine, not of this file, so the option is not
+# written here: the CI job reads `clang-cl --version` - the same thing Node's own
+# vcbuild.bat does - and appends --clang-cl=<version> to the arguments. Building by
+# hand on Windows means adding that option yourself, with the version you have.

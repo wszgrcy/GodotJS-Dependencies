@@ -7,86 +7,241 @@ on:
         description: 'package version tag'
         type: string
         required: true
-      v8_version:
-        description: 'v8 version tag'
+      node_version:
+        description: 'node version tag; the V8 bundle is built at the V8 this Node embeds'
         type: choice
         options:
-          - "15.7.112.12"
-          # 15.6.75.19 and older cannot be built for Windows at all, see the
-          # "V8 15.x and newer" section of the README. Kept so an existing
-          # Linux-only bundle can still be reproduced.
-          - "15.6.75.19"
-          - "13.5.119"
-          - "12.9.202.28" # 2022
-          - "12.6.228.49" # last release that still builds as a C++17 embedder
-          - "12.4.254.21" # 2019
-        required: true
-        default: "15.7.112.12"
+          - "26.13.1"
+        required: false
+        default: "26.13.1"
+      runtime:
+        description: 'node = libnode bundle only (the runtime being added here); both = also rebuild the standalone V8 bundle; v8 = V8 bundle only. libwebsockets is built in all three cases - it is the DevTools debugger transport, not a JS runtime'
+        type: choice
+        options:
+          - node
+          - both
+          - v8
+        default: node
 
 jobs:
+  # There is one version input: node_version. V8 is not asked for, because V8
+  # follows Node: the standalone v8_<ver>.zip is built at whichever V8 the chosen
+  # Node embeds (Node 26.13.1 embeds 14.6.202.34), which derive_v8 reads out of
+  # Node's own tag with tools/node_v8_version.sh. A release whose Node bundle carries
+  # one V8 and whose standalone bundle carries another is two engines to test for
+  # no benefit.
+  #
+  # Default is runtime=node: the V8 bundle already exists from earlier releases, so
+  # the work here is the Node bundle. With runtime=both, derive_v8 also decides
+  # whether a standalone V8 bundle can be built at the derived version at all -
+  # these scripts build the 15.x packages (their extra gn arguments only exist
+  # there), so a Node version embedding an older V8 (26 -> 14.6) leaves the eight
+  # V8 jobs skipped with the reason printed, unless vars.FORCE_V8_PRE_15=true asks
+  # for a first attempt.
+  #
+  # What the standalone V8 bundle is for: today GodotJS links libv8_monolith.a on
+  # Android and iOS (`SCsub`), because upstream Node says Android is unsupported and
+  # does not cover iOS at all. That is a statement about upstream CI, not about what
+  # is possible - shipped third-party plugins do run Node on both mobile platforms -
+  # so this repo can cross-build libnode for Android and iOS as well. Both jobs are
+  # off until they have been run green (NODE_ANDROID / NODE_IOS). Desktop can use
+  # either runtime. The web export needs neither - GodotJS's web bridge (impl/web)
+  # runs inside the browser's own JavaScript engine.
+  #
+  # The individual build_v8_*.yml workflows still take a v8_version input, so an
+  # older V8 (13.5.119, 12.9.202.28, the last C++17 one 12.6.228.49) can still be
+  # built by hand; only this all-in-one workflow stopped asking for it.
+  derive_v8:
+    if: ${{ inputs.runtime != 'node' }}
+    runs-on: ubuntu-latest
+    outputs:
+      v8_version: ${{ steps.derive.outputs.v8_version }}
+      windows_ok: ${{ steps.derive.outputs.windows_ok }}
+      buildable_ok: ${{ steps.derive.outputs.buildable_ok }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: Scripts
+
+      - name: Read the V8 version this Node embeds
+        id: derive
+        env:
+          NODE_VERSION: ${{ inputs.node_version }}
+        run: |
+          set -euo pipefail
+          version="$(bash Scripts/tools/node_v8_version.sh "$NODE_VERSION")"
+          echo "v8_version=$version" >> "$GITHUB_OUTPUT"
+          # These build scripts cover V8 14.x and 15.x. The extra gn arguments
+          # (v8_use_metagen and friends) only exist from 15 on, and nothing older
+          # than 14 has ever been built here, so anything below 14 is left to the
+          # individual build_v8_*.yml workflows, which still take a v8_version.
+          # A 14.x build needs a host libstdc++ from GCC 14: std::powl, called by
+          # src/objects/js-duration-format.cc, is not declared before libstdc++ 14
+          # (measured: g++-12 and g++-13 reject it, g++-14 and g++-15 accept it), so
+          # the two Linux jobs install g++-14 and 14.x is attempted rather than
+          # skipped. That was the reason the first 14.6 run failed.
+          if python3 - "$version" <<'PY'
+          import sys
+          sys.exit(0 if int(sys.argv[1].split('.')[0]) >= 14 else 1)
+          PY
+          then
+            echo "buildable_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "buildable_ok=false" >> "$GITHUB_OUTPUT"
+            echo "V8 $version is older than the 14.x/15.x these scripts build: the"
+            echo "standalone V8 jobs skip. Build such a version by dispatching"
+            echo "build_v8_*.yml directly with a v8_version."
+          fi
+          # A standalone Windows bundle needs V8 15.7.112.1 or newer: below that,
+          # MSVC's std::atomic alignment makes V8's packed ExtendedMap come out the
+          # wrong size (README: "Windows needs V8 15.7.112.1 or newer"). Older V8 is
+          # fine on every other platform, and Windows desktop takes its runtime from
+          # the Node bundle instead.
+          if python3 - "$version" <<'PY'
+          import sys
+          sys.exit(0 if tuple(int(p) for p in sys.argv[1].split('.')) >= (15, 7, 112, 1) else 1)
+          PY
+          then
+            echo "windows_ok=true" >> "$GITHUB_OUTPUT"
+            echo "Node $NODE_VERSION embeds V8 $version; a standalone Windows bundle can be built"
+          else
+            echo "windows_ok=false" >> "$GITHUB_OUTPUT"
+            echo "Node $NODE_VERSION embeds V8 $version, older than 15.7.112.1: no standalone"
+            echo "Windows bundle (MSVC cannot build it). Windows desktop gets the Node bundle."
+          fi
+
   v8_android_arm64:
+    needs: derive_v8
+    if: ${{ inputs.runtime != 'node' && (needs.derive_v8.outputs.buildable_ok == 'true' || vars.FORCE_V8_PRE_15 == 'true') }}
     uses: ./.github/workflows/build_v8_android_arm64.yml
     with:
-      v8_version: ${{ inputs.v8_version }}
+      v8_version: ${{ needs.derive_v8.outputs.v8_version }}
     secrets: inherit
 
   v8_android_arm32:
+    needs: derive_v8
+    if: ${{ inputs.runtime != 'node' && (needs.derive_v8.outputs.buildable_ok == 'true' || vars.FORCE_V8_PRE_15 == 'true') }}
     uses: ./.github/workflows/build_v8_android_arm32.yml
     with:
-      v8_version: ${{ inputs.v8_version }}
+      v8_version: ${{ needs.derive_v8.outputs.v8_version }}
     secrets: inherit
 
   v8_android_x86_64:
+    needs: derive_v8
+    if: ${{ inputs.runtime != 'node' && (needs.derive_v8.outputs.buildable_ok == 'true' || vars.FORCE_V8_PRE_15 == 'true') }}
     uses: ./.github/workflows/build_v8_android_x86_64.yml
     with:
-      v8_version: ${{ inputs.v8_version }}
+      v8_version: ${{ needs.derive_v8.outputs.v8_version }}
     secrets: inherit
 
   v8_ios_arm64:
-    if: ${{ vars.SKIP_APPLE != 'true' }}
+    needs: derive_v8
+    if: ${{ inputs.runtime != 'node' && vars.SKIP_APPLE != 'true' && (needs.derive_v8.outputs.buildable_ok == 'true' || vars.FORCE_V8_PRE_15 == 'true') }}
     uses: ./.github/workflows/build_v8_ios_arm64.yml
     with:
-      v8_version: ${{ inputs.v8_version }}
+      v8_version: ${{ needs.derive_v8.outputs.v8_version }}
     secrets: inherit
 
   v8_macos_arm64:
-    if: ${{ vars.SKIP_APPLE != 'true' }}
+    needs: derive_v8
+    if: ${{ inputs.runtime != 'node' && vars.SKIP_APPLE != 'true' && (needs.derive_v8.outputs.buildable_ok == 'true' || vars.FORCE_V8_PRE_15 == 'true') }}
     uses: ./.github/workflows/build_v8_macos_arm64.yml
     with:
-      v8_version: ${{ inputs.v8_version }}
+      v8_version: ${{ needs.derive_v8.outputs.v8_version }}
     secrets: inherit
 
   v8_macos_x86_64:
-    if: ${{ vars.SKIP_APPLE != 'true' }}
+    needs: derive_v8
+    if: ${{ inputs.runtime != 'node' && vars.SKIP_APPLE != 'true' && (needs.derive_v8.outputs.buildable_ok == 'true' || vars.FORCE_V8_PRE_15 == 'true') }}
     uses: ./.github/workflows/build_v8_macos_x86_64.yml
     with:
-      v8_version: ${{ inputs.v8_version }}
+      v8_version: ${{ needs.derive_v8.outputs.v8_version }}
     secrets: inherit
 
   v8_linux_x86_64:
+    needs: derive_v8
+    if: ${{ inputs.runtime != 'node' && (needs.derive_v8.outputs.buildable_ok == 'true' || vars.FORCE_V8_PRE_15 == 'true') }}
     uses: ./.github/workflows/build_v8_linux_x86_64.yml
     with:
-      v8_version: ${{ inputs.v8_version }}
+      v8_version: ${{ needs.derive_v8.outputs.v8_version }}
     secrets: inherit
 
   v8_linux_arm64:
+    needs: derive_v8
+    if: ${{ inputs.runtime != 'node' && (needs.derive_v8.outputs.buildable_ok == 'true' || vars.FORCE_V8_PRE_15 == 'true') }}
     uses: ./.github/workflows/build_v8_linux_arm64.yml
     with:
-      v8_version: ${{ inputs.v8_version }}
+      v8_version: ${{ needs.derive_v8.outputs.v8_version }}
     secrets: inherit
 
   v8_windows_x86_64:
-    if: ${{ vars.SKIP_WINDOWS != 'true' }}
+    needs: derive_v8
+    if: ${{ inputs.runtime != 'node' && vars.SKIP_WINDOWS != 'true' && needs.derive_v8.outputs.windows_ok == 'true' }}
     uses: ./.github/workflows/build_v8_windows_x86_64.yml
     with:
-      v8_version: ${{ inputs.v8_version }}
+      v8_version: ${{ needs.derive_v8.outputs.v8_version }}
     secrets: inherit
 
   v8_windows_arm64:
-    if: ${{ vars.SKIP_WINDOWS != 'true' }}
+    needs: derive_v8
+    if: ${{ inputs.runtime != 'node' && vars.SKIP_WINDOWS != 'true' && needs.derive_v8.outputs.windows_ok == 'true' }}
     uses: ./.github/workflows/build_v8_windows_arm64.yml
     with:
-      v8_version: ${{ inputs.v8_version }}
+      v8_version: ${{ needs.derive_v8.outputs.v8_version }}
+    secrets: inherit
+
+  # Node bundles are one matrix workflow, called once per platform so that
+  # vars.SKIP_APPLE / vars.SKIP_WINDOWS switch them off the way they do for V8.
+  # Each platform produces its own release asset (node_<version>_<platform>.<arch>.zip),
+  # because the archives are far too big to put every platform into one download.
+  node_linux:
+    if: ${{ inputs.runtime != 'v8' }}
+    uses: ./.github/workflows/build_node.yml
+    with:
+      node_version: ${{ inputs.node_version }}
+      only: linux
+    secrets: inherit
+
+  node_macos:
+    if: ${{ inputs.runtime != 'v8' && vars.SKIP_APPLE != 'true' }}
+    uses: ./.github/workflows/build_node.yml
+    with:
+      node_version: ${{ inputs.node_version }}
+      only: macos
+    secrets: inherit
+
+  node_windows:
+    if: ${{ inputs.runtime != 'v8' && vars.SKIP_WINDOWS != 'true' }}
+    uses: ./.github/workflows/build_node.yml
+    with:
+      node_version: ${{ inputs.node_version }}
+      only: windows
+    secrets: inherit
+
+  # Android Node is cross-compiled with the NDK. Upstream does not support it (Node
+  # 26 removed its android configure helper), so the job stays off until it has been
+  # run green: set the repository variable NODE_ANDROID=true to include it, or
+  # dispatch build_node.yml with only=android while testing it. Keeping it out of
+  # the default matrix means an unproven target cannot fail a release.
+  node_android:
+    if: ${{ inputs.runtime != 'v8' && vars.NODE_ANDROID == 'true' }}
+    uses: ./.github/workflows/build_node.yml
+    with:
+      node_version: ${{ inputs.node_version }}
+      only: android
+    secrets: inherit
+
+  # iOS as well: gyp has no ios flavour, so the toolchain is handed to configure as
+  # wrapper compilers (see node.ios_arm64.configure.txt for the three obstacles
+  # found in Node's own build machinery). Third-party builds prove it is reachable;
+  # ours has not been run yet, hence the variable. Respects SKIP_APPLE because it
+  # needs a macOS runner.
+  node_ios:
+    if: ${{ inputs.runtime != 'v8' && vars.NODE_IOS == 'true' && vars.SKIP_APPLE != 'true' }}
+    uses: ./.github/workflows/build_node.yml
+    with:
+      node_version: ${{ inputs.node_version }}
+      only: ios
     secrets: inherit
 
   lws_linux_x86_64:
@@ -140,6 +295,7 @@ jobs:
     permissions:
       contents: write
     needs:
+      - derive_v8
       - v8_android_arm32
       - v8_android_arm64
       - v8_android_x86_64
@@ -150,6 +306,11 @@ jobs:
       - v8_linux_x86_64
       - v8_windows_arm64
       - v8_windows_x86_64
+      - node_linux
+      - node_macos
+      - node_windows
+      - node_android
+      - node_ios
       - lws_linux_x86_64
       - lws_linux_arm64
       - lws_android_arm64
@@ -163,6 +324,7 @@ jobs:
     if: >-
       ${{
         always() &&
+        (needs.derive_v8.result == 'success' || needs.derive_v8.result == 'skipped') &&
         (needs.v8_android_arm32.result == 'success' || needs.v8_android_arm32.result == 'skipped') &&
         (needs.v8_android_arm64.result == 'success' || needs.v8_android_arm64.result == 'skipped') &&
         (needs.v8_android_x86_64.result == 'success' || needs.v8_android_x86_64.result == 'skipped') &&
@@ -173,6 +335,11 @@ jobs:
         (needs.v8_linux_x86_64.result == 'success' || needs.v8_linux_x86_64.result == 'skipped') &&
         (needs.v8_windows_arm64.result == 'success' || needs.v8_windows_arm64.result == 'skipped') &&
         (needs.v8_windows_x86_64.result == 'success' || needs.v8_windows_x86_64.result == 'skipped') &&
+        (needs.node_linux.result == 'success' || needs.node_linux.result == 'skipped') &&
+        (needs.node_macos.result == 'success' || needs.node_macos.result == 'skipped') &&
+        (needs.node_windows.result == 'success' || needs.node_windows.result == 'skipped') &&
+      (needs.node_android.result == 'success' || needs.node_android.result == 'skipped') &&
+      (needs.node_ios.result == 'success' || needs.node_ios.result == 'skipped') &&
         (needs.lws_linux_x86_64.result == 'success' || needs.lws_linux_x86_64.result == 'skipped') &&
         (needs.lws_linux_arm64.result == 'success' || needs.lws_linux_arm64.result == 'skipped') &&
         (needs.lws_android_arm64.result == 'success' || needs.lws_android_arm64.result == 'skipped') &&
@@ -191,6 +358,7 @@ jobs:
           merge-multiple: true
 
       - name: packaging
+        id: pack
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -198,11 +366,46 @@ jobs:
           echo "Downloaded artifacts layout:"
           ls -R staging || true
 
-          (cd staging && zip -r "v8_${{ github.event.inputs.v8_version }}.zip" v8/)
-          echo "Created V8 bundle: staging/v8_${{ github.event.inputs.v8_version }}.zip"
+          # Each runtime is only zipped when its jobs ran: with runtime=v8 or
+          # runtime=node, or a platform switched off by vars.SKIP_*, the directory
+          # simply is not there, and that is not an error.
+          if [ -d staging/v8 ]; then
+            (cd staging && zip -r "v8_${{ needs.derive_v8.outputs.v8_version }}.zip" v8/)
+            echo "Created V8 bundle: staging/v8_${{ needs.derive_v8.outputs.v8_version }}.zip"
+          else
+            echo "No v8/ artifacts (runtime=${{ github.event.inputs.runtime }}), skipped"
+          fi
 
-          (cd staging && zip -r "lws_4.3.zip" lws/)
-          echo "Created LWS bundle: staging/lws_4.3.zip"
+          if [ -d staging/lws ]; then
+            (cd staging && zip -r "lws_4.3.zip" lws/)
+            echo "Created LWS bundle: staging/lws_4.3.zip"
+          else
+            echo "No lws/ artifacts, skipped"
+          fi
+
+          # Node gets one archive per platform instead of one bundle like V8: the
+          # headers are shared, the libraries are not, and every platform's set is
+          # far bigger than the whole V8 bundle. The file name carries the platform
+          # so an engine build only downloads what it links.
+          shopt -s nullglob
+          for platform_dir in staging/node/*.release staging/node/*_release; do
+            [ -d "$platform_dir" ] || continue
+            name="$(basename "$platform_dir")"
+            plat_arch="${name%_release}"
+            plat_arch="${plat_arch%.release}"
+            asset="node_${{ github.event.inputs.node_version }}_${plat_arch}.zip"
+            (cd staging && zip -qr "$asset" node/include "node/$name")
+            echo "Created Node bundle: staging/$asset"
+          done
+
+          # The release page gets the list that was actually produced, which is the
+          # quickest way to see which runtime and which platforms made it.
+          assets=""
+          for archive in staging/*.zip; do
+            [ -f "$archive" ] || continue
+            assets="$assets $(basename "$archive")"
+          done
+          printf 'assets=%s\n' "${assets# }" >> "$GITHUB_OUTPUT"
 
       - name: Create Release and Upload Assets
         env:
@@ -211,6 +414,6 @@ jobs:
           gh release create "${{ github.event.inputs.bundle_tag }}" \
             staging/*.zip \
             --title "${{ github.event.inputs.bundle_tag }}" \
-            --notes "V8 and libwebsockets bundles." \
+            --notes "Bundles: ${{ steps.pack.outputs.assets }}" \
             --repo ${{ github.repository }} \
             --target ${{ github.sha }}

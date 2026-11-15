@@ -1,0 +1,30 @@
+# ./configure arguments for Node.js on Linux x86_64.
+#
+# One argument per line. Blank lines and lines starting with # are ignored, and
+# prepare_node_build.sh may append more lines from node.extra_<major>.x.configure.txt.
+#
+# ./configure is plain Python argparse: an option this Node version does not
+# declare makes it fail, so anything newer than the oldest Node we build has to
+# live in that extra file instead of here.
+
+--ninja
+--dest-os=linux
+--dest-cpu=x64
+
+# ICU with every locale. GodotJS uses Intl.Collator for pinyin sorting,
+# Intl.NumberFormat for grouping separators, and Intl.Segmenter to split Chinese
+# text into words; small-icu only has English, and none removes Intl.* completely.
+# Unlike the V8-only build there is no icudtl.dat to ship: Node links the ICU
+# data into libicudata.a, so the engine has no data file to find at runtime.
+--with-intl=full-icu
+
+# Ignore NODE_OPTIONS from the environment. An engine must behave the same for
+# every user, and a user-set NODE_OPTIONS would silently change it.
+--without-node-options
+
+# npm is a package manager, not something the embedded runtime needs.
+--without-npm
+
+# Drop the Single Executable Application packaging support; it drags in LIEF and
+# is only useful when Node builds a standalone .exe.
+--disable-single-executable-application

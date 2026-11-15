@@ -1,0 +1,14 @@
+# ./configure arguments for Node.js on macOS arm64 (Apple silicon).
+# See node.linux_x86_64.configure.txt for what the shared options do.
+#
+# Node's build sets MACOSX_DEPLOYMENT_TARGET from common.gypi (13.5). Raise it
+# with --macos-deployment-target only if the engine's own floor moves.
+
+--ninja
+--dest-os=mac
+--dest-cpu=arm64
+
+--with-intl=full-icu
+--without-node-options
+--without-npm
+--disable-single-executable-application

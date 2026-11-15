@@ -1,0 +1,364 @@
+name: node (all platforms)
+
+# One workflow with a matrix, instead of one file per platform like the V8 jobs:
+# every Node platform is built with the same steps (configure from
+# node.<platform>_<arch>.configure.txt, package_node.sh, verify_node_bundle.sh),
+# so the only per-platform differences are the runner, the args file, and the
+# toolchain setup. The V8 jobs each need their own depot_tools workaround, which
+# is why they are separate files.
+#
+# Android is in the matrix and cross-compiled with the NDK. Upstream says Android
+# is not a supported platform, and Node 26 even removed the android_configure
+# helper, so the cross toolchain is handed to configure through gyp's environment
+# variables - see node.android_*.configure.txt and prepare_node_build.sh. The
+# bundle check for those targets is compile-and-link with the NDK compiler, not a
+# run (there is no device), which still catches a missing archive, a wrong
+# --whole-archive group, or an ABI mismatch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      node_version:
+        description: 'node version, without the leading v'
+        type: string
+        required: false
+        default: '26.13.1'
+      only:
+        description: 'limit the matrix to one platform (linux|macos|windows|android|ios), empty = all'
+        type: string
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      node_version:
+        required: true
+        type: string
+      only:
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  # The matrix is built here rather than written out on the job, because the
+  # `only` filter has to remove whole matrix entries and a job-level `if` cannot
+  # see `matrix`. build_all.yml passes `only` once per platform, so that
+  # vars.SKIP_WINDOWS and vars.SKIP_APPLE switch platforms off the way they do for
+  # the V8 jobs, and a skipped platform still counts as "not a failure" when the
+  # release assets are assembled.
+  pick:
+    runs-on: ubuntu-latest
+    outputs:
+      entries: ${{ steps.pick.outputs.entries }}
+    steps:
+      - id: pick
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          set -euo pipefail
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os
+
+          entries = [
+            {"platform": "linux", "arch": "x86_64", "runner": "ubuntu-24.04"},
+            # Native arm64 runner: Node builds its own V8 snapshot with a
+            # host-arch mksnapshot, which a cross build cannot do without qemu.
+            {"platform": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm"},
+            {"platform": "macos", "arch": "arm64", "runner": "macos-latest"},
+            {"platform": "macos", "arch": "x86_64", "runner": "macos-latest"},
+            {"platform": "windows", "arch": "x86_64", "runner": "windows-2022"},
+            {"platform": "windows", "arch": "arm64", "runner": "windows-2022"},
+            # Cross builds: the host machine is the same Linux x86_64 runner for
+            # all three, the target differs. Host tools (mksnapshot, the JS snapshot
+            # blob) are still built with the host compiler, which is what makes
+            # these work without qemu.
+            {"platform": "android", "arch": "arm64", "runner": "ubuntu-24.04"},
+            {"platform": "android", "arch": "arm32", "runner": "ubuntu-24.04"},
+            {"platform": "android", "arch": "x86_64", "runner": "ubuntu-24.04"},
+            # iOS: cross from a macOS runner with wrapper compilers that bake in the
+            # iPhoneOS SDK (gyp has no ios flavour). See node.ios_arm64.configure.txt.
+            {"platform": "ios", "arch": "arm64", "runner": "macos-latest"},
+          ]
+
+          only = os.environ.get("ONLY", "").strip()
+          if only:
+              entries = [e for e in entries if e["platform"] == only]
+              if not entries:
+                  raise SystemExit(
+                      f"only={only}: expected one of linux, macos, windows")
+
+          print(f"entries={json.dumps(entries)}")
+          PY
+
+  node:
+    needs: pick
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJson(needs.pick.outputs.entries) }}
+    name: node ${{ matrix.entry.platform }} ${{ matrix.entry.arch }}
+    runs-on: ${{ matrix.entry.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      NODE_VERSION: ${{ inputs.node_version }}
+      NODE_PLATFORM: ${{ matrix.entry.platform }}
+      NODE_ARCH: ${{ matrix.entry.arch }}
+      ARGS_FILE: node.${{ matrix.entry.platform }}_${{ matrix.entry.arch }}.configure.txt
+      # Bionic API level the NDK wrappers target. 28 matches the minimum the Godot
+      # Android export templates use.
+      NODE_ANDROID_API: ${{ vars.NODE_ANDROID_API || '28' }}
+      # iPhoneOS deployment target for the iOS wrappers. Same value gode and
+      # moluopro/libnode use for their shipped libnode.
+      NODE_IOS_DEPLOYMENT: ${{ vars.NODE_IOS_DEPLOYMENT || '16.0' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: Scripts
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          case "$NODE_PLATFORM" in
+            linux)
+              # Node 26 needs GCC >= 13.2 or Clang >= 19.1 - but that is only half
+              # the requirement: the C++ standard library headers have to come from
+              # the same generation, because V8 14.x uses C++20 library pieces that
+              # libstdc++ 12 has in an incomplete form (its std::atomic_ref has no
+              # deduction guide, and cppgc relies on CTAD there). A clang from a
+              # newer generation paired with libstdc++ 12 headers fails somewhere
+              # around src/heap/cppgc, which is 30 minutes into the build.
+              # So name the compiler explicitly and check the pair before starting.
+              sudo apt-get update
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                ninja-build xz-utils gcc-13 g++-13
+              {
+                echo "CC=gcc-13"
+                echo "CXX=g++-13"
+              } >> "$GITHUB_ENV"
+              echo "image defaults: $(cc --version | head -1) / $(c++ --version | head -1)"
+              echo "pinned to:      $(gcc-13 --version | head -1) / $(g++-13 --version | head -1)"
+
+              # The standard library this compiler will actually include, which is
+              # not the same thing as the compiler's own version.
+              read -r stdlib_major stdlib_minor < <(echo | g++-13 -dM -E -x c++ - \
+                | awk '/#define __GNUC__ /{g=$3} /#define __GNUC_MINOR__ /{m=$3} END{print g, m}')
+              echo "libstdc++ headers in use: ${stdlib_major}.${stdlib_minor}"
+              if [ "$stdlib_major" -lt 13 ]; then
+                echo "libstdc++ ${stdlib_major}.${stdlib_minor} is too old for V8 14.x; install gcc-13/g++-13"
+                exit 1
+              fi
+              ;;
+            macos)
+              # Node 26 needs Xcode >= 16.4 (Apple LLVM >= 19). Print the version
+              # so a failure says whether the image is behind.
+              xcodebuild -version
+              ninja --version
+              ;;
+            windows)
+              # From Node 24 on, Windows is built with clang-cl, which is an
+              # optional Visual Studio component. Fail here with the component
+              # names rather than deep inside configure.
+              clang-cl --version || {
+                echo "clang-cl is not on PATH. The runner image needs the Visual"
+                echo "Studio optional components"
+                echo "  Microsoft.VisualStudio.Component.VC.Llvm.Clang"
+                echo "  Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset"
+                exit 1
+              }
+              # ./configure takes the LLVM version as --clang-cl's value: a bare
+              # --clang-cl stops with "argument --clang-cl: expected one argument".
+              # Node's own vcbuild.bat reads the version out of the installed LLVM
+              # toolset and passes --clang-cl=<version>, so do the same and let the
+              # build step add it to the arguments; the value also feeds gyp's
+              # llvm_version and the major is used to find clang_rt.profile.
+              clang_cl_version="$(clang-cl --version | head -1 | awk '{print $3}')"
+              case "$clang_cl_version" in
+                [0-9]*)
+                  echo "NODE_CLANG_CL_VERSION=$clang_cl_version" >> "$GITHUB_ENV"
+                  echo "clang-cl $clang_cl_version"
+                  ;;
+                *)
+                  echo "cannot read a version out of clang-cl --version"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            android)
+              # gyp reads the cross toolchain from CC_target/CXX_target/AR_target/
+              # NM_target/READELF_target, and the NDK wrapper compilers already have
+              # the target and API level in their file names, so those variables are
+              # all configure needs. prepare_node_build.sh repeats the check and
+              # explains the same thing if a variable is missing.
+              ndk="${NODE_ANDROID_NDK:-${ANDROID_NDK_LATEST_HOME:-}}"
+              if [ -z "$ndk" ] && [ -d "${ANDROID_HOME:-}/ndk" ]; then
+                newest="$(ls -1 "${ANDROID_HOME}/ndk" | sort -V | tail -1)"
+                ndk="${ANDROID_HOME}/ndk/${newest}"
+              fi
+              if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
+                echo "No Android NDK. Set NODE_ANDROID_NDK, or let the image provide"
+                echo "ANDROID_NDK_LATEST_HOME, or install one with:"
+                echo "  sdkmanager --install 'ndk;28.2.13676358'"
+                exit 1
+              fi
+              case "$(uname -s)" in
+                Linux) host_tag=linux-x86_64 ;;
+                Darwin) host_tag=darwin-x86_64 ;;
+                *) echo "unsupported NDK host: $(uname -s)"; exit 1 ;;
+              esac
+              ndk_bin="$ndk/toolchains/llvm/prebuilt/$host_tag/bin"
+              case "$NODE_ARCH" in
+                arm64) triple="aarch64-linux-android$NODE_ANDROID_API" ;;
+                arm32) triple="armv7a-linux-androideabi$NODE_ANDROID_API" ;;
+                x86_64) triple="x86_64-linux-android$NODE_ANDROID_API" ;;
+                *) echo "no Android triple for arch $NODE_ARCH"; exit 1 ;;
+              esac
+              for tool in "${triple}-clang" "${triple}-clang++" llvm-ar llvm-nm llvm-readelf; do
+                if [ ! -x "$ndk_bin/$tool" ]; then
+                  echo "NDK tool is missing: $ndk_bin/$tool"
+                  exit 1
+                fi
+              done
+              {
+                echo "CC_target=$ndk_bin/${triple}-clang"
+                echo "CXX_target=$ndk_bin/${triple}-clang++"
+                echo "AR_target=$ndk_bin/llvm-ar"
+                echo "NM_target=$ndk_bin/llvm-nm"
+                echo "READELF_target=$ndk_bin/llvm-readelf"
+                # The bundle cannot be executed here, so the check stops after the
+                # link. That still proves the archives are complete and in the order
+                # link.txt claims.
+                echo "NODE_VERIFY_CXX=$ndk_bin/${triple}-clang++"
+                echo "NODE_VERIFY_LINK_ONLY=1"
+              } >> "$GITHUB_ENV"
+              echo "NDK $ndk, API $NODE_ANDROID_API, triple $triple"
+              "$ndk_bin/${triple}-clang++" --version | head -1
+              ;;
+            ios)
+              # gyp has no "ios" flavour, so Node would otherwise keep using the host
+              # toolchain and produce macOS objects. There is no wrapper compiler for
+              # iPhoneOS the way the NDK has one, and a compiler flag cannot be passed
+              # through CC_target as a bare string, so write tiny wrappers that bake in
+              # the triple and the SDK path.
+              deployment="${NODE_IOS_DEPLOYMENT:-16.0}"
+              sdk_path="$(xcrun --sdk iphoneos --show-sdk-path)"
+              xc_bin="$RUNNER_TEMP/node-xc-bin"
+              mkdir -p "$xc_bin"
+              printf '#!/bin/sh\nexec xcrun --sdk iphoneos clang -target arm64-apple-ios%s -isysroot "%s" "$@"\n' "$deployment" "$sdk_path" > "$xc_bin/cc"
+              printf '#!/bin/sh\nexec xcrun --sdk iphoneos clang++ -target arm64-apple-ios%s -isysroot "%s" "$@"\n' "$deployment" "$sdk_path" > "$xc_bin/cxx"
+              for tool in ar nm; do
+                printf '#!/bin/sh\nexec xcrun --sdk iphoneos %s "$@"\n' "$tool" > "$xc_bin/$tool"
+              done
+              chmod +x "$xc_bin"/*
+              {
+                echo "CC_target=$xc_bin/cc"
+                echo "CXX_target=$xc_bin/cxx"
+                echo "AR_target=$xc_bin/ar"
+                echo "NM_target=$xc_bin/nm"
+                # No READELF_target: the Xcode toolchain has no readelf, and a static
+                # build does not reach the rules that would call it.
+                echo "NODE_VERIFY_CXX=$xc_bin/cxx"
+                echo "NODE_VERIFY_LINK_ONLY=1"
+                # What a consumer has to link besides the archives; gode's CMakeLists
+                # uses -framework Foundation for its iOS libnode.
+                echo "NODE_VERIFY_EXTRA_LINK=-framework Foundation"
+              } >> "$GITHUB_ENV"
+              echo "iOS deployment target $deployment, SDK $sdk_path"
+              "$xc_bin/cxx" --version | head -1
+              ;;
+          esac
+
+      - name: Fetch Node source
+        run: |
+          set -euo pipefail
+          curl -fL -o node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz"
+          tar -xf node.tar.xz
+          mv "node-v${NODE_VERSION}" node
+          df -h . || true
+
+      - name: Build Node
+        run: |
+          set -euo pipefail
+          cd node
+          cp "../Scripts/$ARGS_FILE" args.txt
+          bash ../Scripts/prepare_node_build.sh . args.txt "$NODE_VERSION"
+
+          # Set by the Toolchain step on Windows only. The version belongs to the
+          # machine, not to a tracked file, so it is added here.
+          if [ -n "${NODE_CLANG_CL_VERSION:-}" ]; then
+            printf -- '--clang-cl=%s\n' "$NODE_CLANG_CL_VERSION" >> args.txt
+          fi
+
+          # One argument per line, comments dropped. Same rule as the args files.
+          mapfile -t NODE_ARGS < <(grep -vE '^[[:space:]]*(#|$)' args.txt)
+          printf 'configure %s\n' "${NODE_ARGS[*]}"
+          python3 ./configure "${NODE_ARGS[@]}"
+
+          ninja -C out/Release node
+
+          # Object files exist so a relink can reuse them. The package step copies
+          # the archives and never looks at them again, and on the hosted runners
+          # they are several of the gigabytes that fill the disk before Package.
+          find out/Release \( -name '*.o' -o -name '*.obj' \) -delete
+          echo "out/Release after dropping objects:"; du -sh out/Release || true
+          df -h . || true
+
+          # Smoke test the binary the archives came from - but only when it was
+          # built for the machine running the job. A cross-built node cannot be
+          # executed here, so the bundle check below is the only gate for those.
+          if [ "$NODE_PLATFORM" = windows ]; then
+            NODE_BIN=out/Release/node.exe
+          else
+            NODE_BIN=out/Release/node
+          fi
+          if [ "$NODE_PLATFORM" = android ] || [ "$NODE_PLATFORM" = ios ]; then
+            echo "cross build for $NODE_PLATFORM/$NODE_ARCH: skipping the host smoke test"
+            ls -l out/Release/libnode.a out/Release/libv8_base_without_compiler.a
+          else
+          "$NODE_BIN" -p 'process.versions.v8 + " icu=" + process.versions.icu'
+          "$NODE_BIN" -e '
+            const assert = require("node:assert");
+            assert.ok(new Intl.Collator("zh").compare("\u7532", "\u4e59") !== 0);
+            assert.strictEqual(new Intl.NumberFormat("en-US").format(1234.5), "1,234.5");
+            assert.strictEqual(require("node:crypto").createHash("sha256").update("x").digest("hex").length, 64);
+            assert.strictEqual(/\p{Script=Han}/u.test("\u4e2d"), true);
+            console.log("node smoke ok");
+          '
+          fi
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          # A failure here is usually "No space left on device" while copying a
+          # few hundred MB of archives; these two lines make the log say so instead
+          # of ending at the cp.
+          df -h . || true
+          cd node
+          # The archive list and the --whole-archive grouping are read out of
+          # out/Release/build.ninja by the script itself. args.txt is what the
+          # build step configured with, and lands in manifest.json for provenance.
+          NODE_CONFIG_ARGS=args.txt \
+            bash ../Scripts/package_node.sh . out/Release ../staging "$NODE_PLATFORM" "$NODE_ARCH"
+
+      - name: Verify the bundle
+        # The probe compiles and runs on POSIX toolchains; on Windows the package
+        # step is still checked, the link test is left to a local run.
+        if: ${{ matrix.entry.platform != 'windows' }}
+        run: bash Scripts/verify_node_bundle.sh staging
+
+      - name: What came out
+        run: |
+          set -euo pipefail
+          du -sh staging/node/* || true
+          ls -l staging/node/*release/ | head -60
+          cat staging/node/*release/link.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt_node_${{ matrix.entry.platform }}_${{ matrix.entry.arch }}
+          path: staging/

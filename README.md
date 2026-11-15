@@ -1,5 +1,5 @@
 # GodotJS-Dependencies
-Workflows to build all dependencies of GodotJS (v8 and libwebsockets).
+Workflows to build all dependencies of GodotJS (v8, node and libwebsockets).
 
 
 - https://github.com/actions/runner-images
@@ -7,10 +7,65 @@ Workflows to build all dependencies of GodotJS (v8 and libwebsockets).
 - https://github.com/actions/create-release
 
 
+## One version input: `node_version`
+
+`build_all.yml` asks for a Node version and nothing else. V8 is not asked for,
+because V8 follows Node: the standalone `v8_<ver>.zip` is built at whichever V8 the
+chosen Node embeds, read out of Node's own tag by `tools/node_v8_version.sh`
+(Node 26.13.1 -> V8 14.6.202.34, and that number does exist as a tag in the V8
+repository). Shipping a release whose Node bundle carries one V8 and whose
+standalone bundle carries another would mean two engines to test for no benefit.
+
+| | `v8_<ver>.zip`, one monolith per platform | `node_<ver>_<platform>.<arch>.zip`, 36 archives + headers |
+|---|---|---|
+| Android | today's default: GodotJS links `libv8_monolith.a` | cross-built with the NDK; job off until it has built green (`NODE_ANDROID=true`) |
+| iOS | today's default: same | cross-built against the iPhoneOS SDK; job off until green (`NODE_IOS=true`). iOS forbids executable memory, so an embedder must start Node with JIT disabled |
+| Linux, macOS, Windows | still usable, and what the engine links today | the Node path |
+| Web export | not needed | not needed: GodotJS's web bridge (`impl/web`) runs inside the browser's own JavaScript engine |
+
+Two consequences of V8 following Node, both deliberate:
+
+- **No standalone Windows bundle while Node's V8 is below 15.7.112.1.** MSVC cannot
+  build V8 below that version (see "Windows needs V8 15.7.112.1 or newer" below), so
+  the two `v8_windows_*` jobs skip themselves and Windows desktop takes its runtime
+  from the Node bundle. The `derive_v8` job prints the reason into the log.
+- Older V8 versions are not lost. Each `build_v8_*.yml` workflow still takes a
+  `v8_version` input of its own, which is how 13.5.119 or the last C++17-compatible
+  one (12.6.228.49) are still built on request.
+
+`runtime` (**default `node`**) picks one runtime when the other is not wanted. The
+V8 bundle already exists from earlier releases, so a normal release builds the Node
+bundle; `both` additionally rebuilds V8, and `derive_v8` then decides whether a
+standalone bundle is buildable at the derived version at all (these scripts build
+the 15.x packages, so a Node version embedding V8 14.x leaves those eight jobs
+skipped with the reason in the log; `FORCE_V8_PRE_15=true` forces an attempt).
+`vars.SKIP_WINDOWS` and
+`vars.SKIP_APPLE` apply to both runtimes the same way.
+
+The Node Linux jobs pin `CC=gcc-13` / `CXX=g++-13` and check the standard library
+version before compiling. Node 26 needs GCC >= 13.2 *or* Clang >= 19.1, and its V8
+uses C++20 library pieces that libstdc++ 12 carries only in incomplete form
+(`std::atomic_ref` with class template argument deduction, which `cppgc` relies
+on). A newer clang paired with libstdc++ 12 headers therefore fails deep inside
+`src/heap/cppgc`, half an hour into the build - so the pair is fixed and asserted
+instead of left to whatever the image happens to resolve.
+
+The ten `lws_*` jobs ignore `runtime` and always build. libwebsockets is not a JS
+runtime: GodotJS uses it as the WebSocket transport for the debugger connection,
+because Godot's own `modules/websocket` cannot finish the handshake with Chrome
+DevTools (see the `JSB_WITH_LWS` note in GodotJS's `SCsub`). Today that define is
+only turned on when the V8 dependency is present (`lws_support` is derived from
+`v8_support` in `SCsub`), so whether the Node path keeps the debugger transport is
+an engine-side decision; the dependency itself is built either way.
+
+
 ## V8 versions
 
-The default is **15.7.112.12**. Windows cannot be built below 15.7.112.1, see
-"Windows needs V8 15.7.112.1 or newer" below.
+`build_all.yml` no longer takes a V8 version at all: it builds the V8 that the
+selected Node embeds (V8 14.6.202.34 for Node 26.13.1). When a V8 bundle is built
+on its own through `build_v8_*.yml`, the version in use is **15.7.112.12**, which
+is also what GodotJS's `SCsub` pins today. Windows cannot be built below
+15.7.112.1, see "Windows needs V8 15.7.112.1 or newer" below.
 
 What a build here costs the embedder depends on the V8 version:
 
@@ -29,12 +84,40 @@ extra gn args, ELF CREL, a newer libstdc++ on Linux, and what has not been
 verified yet.
 
 
+## Node versions
+
+The default is **26.13.1** (Active LTS). Node embeds V8 itself, so a Node bundle
+is an alternative to the V8 bundle, not an addition to it: Node 26.13.1 ships
+V8 14.6.202.34, and no published Node release carries a 15.x V8.
+
+Unlike the V8 bundle, Node is desktop-first in upstream's eyes: `BUILDING.md` says
+Android is unsupported and does not cover iOS. That is about upstream's CI - shipped
+third-party plugins do run Node on both - so this repo cross-builds both mobile
+targets too, with the toolchain handed over as wrapper compilers and a link-only
+bundle check because there is no device to run on (`docs/node-26.md` section 6).
+Neither has been compiled here yet, so both jobs stay off by default. One Node
+release is also far bigger: about 67 MB compressed per platform, 36 archives instead
+of one, six of which must be linked with `--whole-archive`. To keep the download
+per engine build reasonable, Node is released as **one asset per platform**
+(`node_<version>_<platform>.<arch>.zip`) instead of one bundle with every
+platform inside.
+
+See [docs/node-26.md](docs/node-26.md) for what has to be changed in Node's
+source before building, what the bundle layout is, the order an embedder has to
+initialise and shut down Node in, and what has not been verified.
+
+
 ## Bundle contents
 
 `v8_<version>.zip` contains `v8/include/` plus one `v8/<platform>.<arch>.release/`
 directory per platform. The headers are copied by the Linux x86_64 job: they are
 identical for every platform, and that is the one job `publish` can never skip
 (`vars.SKIP_WINDOWS` and `vars.SKIP_APPLE` can skip the others).
+
+`node_<version>_<platform>.<arch>.zip` contains `node/include/` (Node's own header
+install: `node.h`, `v8.h`, `uv.h`, `cppgc/`, `openssl/`) plus one
+`node/<platform>.<arch>.release/` directory with the archives, `link.txt` (which
+archives, in which order, which ones whole-archive) and `manifest.json`.
 
 Each platform directory also carries `icudtl.dat`. ICU is built with
 `icu_use_data_file = true`, so its language resources live in that file instead of
@@ -89,10 +172,16 @@ archive, faster link) run the script with `V8_KEEP_CREL=1`, and then link the
 result with `-fuse-ld=lld` — GNU `nm`, `objdump`, `ar` and `objcopy` cannot read
 the archive either.
 
-The Linux jobs install `g++-13` for V8 15 and newer. V8 15 uses
-`std::atomic_ref`, which needs libstdc++ from GCC 12 or newer, while
-`ubuntu-22.04` ships GCC 11. clang automatically uses the newest GCC
-installation it finds, so no `cc`/`cxx` args are needed.
+The Linux jobs install `g++-14` for V8 14 and newer. The source needs two things
+libstdc++ only declares in a newer compiler:
+`std::hardware_destructive_interference_size` (from GCC 12; a `static_assert` in
+`src/heap/mutable-page.cc`) and `std::powl` (from GCC 14; called by
+`src/objects/js-duration-format.cc`). Measured on that call: g++-12 and g++-13
+fail with `no member named 'powl' in namespace 'std'`, g++-14 and g++-15 compile
+it. `ubuntu-24.04` ships GCC 13, so `g++-14` goes in next to it, and clang
+automatically uses the newest GCC installation it finds, so no `cc`/`cxx` args
+are needed. What the newer image costs is the C library floor - `use_sysroot`
+is off, so the archives inherit the runner's glibc (2.39 on 24.04).
 
 Two things to know when embedding a 15.x build:
 
