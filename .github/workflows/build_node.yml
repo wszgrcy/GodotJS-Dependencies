@@ -69,32 +69,41 @@ jobs:
             {"platform": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm"},
             {"platform": "macos", "arch": "arm64", "runner": "macos-latest"},
             # macOS x86_64 is cross-built on the arm64 runner, which splits Node's
-            # toolset and therefore needs the fix prepare_node_build.sh carries
-            # (docs/node-26.md section 9.4). Native Intel images exist but are not
+            # toolset and therefore needs the two fixes prepare_node_build.sh carries
+            # (docs/node-26.md section 10.1). Native Intel images exist but are not
             # usable by default: every hosted Intel macOS label is a *larger* runner
             # (macos-15-intel / macos-15-large, macos-26-intel / macos-26-large), and
             # GitHub offers larger runners only on the Team and Enterprise Cloud
             # plans, so on a Free or Pro account the job would queue and never start.
             # Switch here if this repository ever gets such a plan.
-            {"platform": "macos", "arch": "x86_64", "runner": "macos-latest"},
+            {"platform": "macos", "arch": "x86_64", "runner": "macos-latest",
+             "cargo_target": "x86_64-apple-darwin"},
             {"platform": "windows", "arch": "x86_64", "runner": "windows-2022"},
             # Cross build: windows-2022 is x64, so arm64 Windows splits the toolset
-            # and depends on the fix prepare_node_build.sh carries (section 9.4).
+            # and depends on the fixes prepare_node_build.sh carries (section 10.1).
             # windows-11-arm is the native alternative once this target is next to it.
-            {"platform": "windows", "arch": "arm64", "runner": "windows-2022"},
+            {"platform": "windows", "arch": "arm64", "runner": "windows-2022",
+             "cargo_target": "aarch64-pc-windows-msvc"},
             # Cross builds: the host machine is the same Linux x86_64 runner for
             # all three, the target differs. Host tools (mksnapshot, the JS snapshot
             # blob) are still built with the host compiler, which is what makes
             # these work without qemu.
-            {"platform": "android", "arch": "arm64", "runner": "ubuntu-24.04"},
-            {"platform": "android", "arch": "arm32", "runner": "ubuntu-24.04"},
-            {"platform": "android", "arch": "x86_64", "runner": "ubuntu-24.04"},
+            {"platform": "android", "arch": "arm64", "runner": "ubuntu-24.04",
+             "cargo_target": "aarch64-linux-android"},
+            {"platform": "android", "arch": "arm32", "runner": "ubuntu-24.04",
+             "cargo_target": "armv7-linux-androideabi"},
+            {"platform": "android", "arch": "x86_64", "runner": "ubuntu-24.04",
+             "cargo_target": "x86_64-linux-android"},
             # iOS: built from a macOS runner with wrapper compilers that bake in the
             # iPhoneOS SDK (gyp has no ios flavour). Same CPU as the runner, so the
             # args file passes --cross-compiling to get the host toolset it needs to
             # run mksnapshot. See node.ios_arm64.configure.txt.
-            {"platform": "ios", "arch": "arm64", "runner": "macos-latest"},
+            {"platform": "ios", "arch": "arm64", "runner": "macos-latest",
+             "cargo_target": "aarch64-apple-ios"},
           ]
+
+          for entry in entries:
+              entry.setdefault("cargo_target", "")
 
           only = os.environ.get("ONLY", "").strip()
           if only:
@@ -159,6 +168,28 @@ jobs:
           # arm64 Node is cross-built from an x64 host, which is what vcvarsall's
           # amd64_arm64 is for.
           arch: ${{ matrix.entry.arch == 'arm64' && 'amd64_arm64' || 'amd64' }}
+
+      - name: Rust toolchain for Temporal
+        # Temporal (the JS API) is built from deps/crates with cargo, and Node enables
+        # it by default; a runner without Rust would otherwise produce a bundle without
+        # it after a one-line warning. prepare_node_build.sh refuses that, so all this
+        # step has to do is show what is installed and, for a cross build, make the
+        # target's standard library available. The static library cargo produces is
+        # compiled, not linked, so cargo needs no linker for the target - just
+        # `rustup target add`.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo --version
+          rustc --version
+          target="${{ matrix.entry.cargo_target }}"
+          if [ -n "$target" ]; then
+            rustup target add "$target"
+            echo "CARGO_BUILD_TARGET=$target" >> "$GITHUB_ENV"
+            echo "cross build: cargo will build Temporal for $target"
+          else
+            echo "native build: cargo uses the host target ($(rustc -vV | awk '/^host:/{print $2}'))"
+          fi
 
       - name: Toolchain
         # Runs on the image's bash; this step installs the newer bash the rest of the

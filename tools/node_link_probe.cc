@@ -344,6 +344,36 @@ void CheckEnvironment(const std::string& step,
             "'built-in modules loaded'; }",
             "process.getBuiltinModule() of fs/os/crypto/zlib works");
 
+  // Whether this bundle has the Temporal API is a build-time decision, not a detail:
+  // Temporal is Rust code in deps/crates, and ./configure drops it - with a single
+  // warning line - when cargo is missing or too old. The manifest records which way the
+  // build went, and verify_node_bundle.sh passes that here, so a bundle whose manifest
+  // and live runtime disagree fails instead of surprising somebody at runtime.
+  {
+    const char* requested = std::getenv("NODE_PROBE_TEMPORAL");
+    const std::string expected = requested != nullptr ? std::string(requested) : "unknown";
+    bool present = false;
+    v8::TryCatch temporal_catch(isolate);
+    v8::Local<v8::String> temporal_text;
+    if (v8::String::NewFromUtf8(isolate, "typeof Temporal == 'undefined' ? 0 : 1")
+            .ToLocal(&temporal_text)) {
+      v8::Local<v8::Script> temporal_script;
+      v8::Local<v8::Value> temporal_value;
+      if (v8::Script::Compile(context, temporal_text).ToLocal(&temporal_script) &&
+          temporal_script->Run(context).ToLocal(&temporal_value)) {
+        present = temporal_value->Uint32Value(context).FromMaybe(0) == 1;
+      }
+    }
+    const std::string found = present ? "present" : "absent";
+    if (expected == "yes" && !present) {
+      Fail(step, "manifest says this bundle has Temporal, but the runtime has no Temporal");
+    } else if (expected == "no" && present) {
+      Fail(step, "manifest says this bundle was built without Temporal, but the runtime has it");
+    } else {
+      Ok(step, "`Temporal` in the runtime is " + found + " (manifest says " + expected + ")");
+    }
+  }
+
   // Full ICU data, which is what makes Intl.Collator, Intl.Segmenter and
   // \\p{Script=Han} work. The V8-only bundle needs an icudtl.dat file next to the
   // executable; Node compiles the data into libicudata.a instead, so nothing has

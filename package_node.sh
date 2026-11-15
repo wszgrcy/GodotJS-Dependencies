@@ -303,9 +303,11 @@ copy_fat() {
   rm -rf "$stage"
 
   local want got dup
-  want="$(grep -c . "$list")"
-  got="$(ar t "$dest/$name" | wc -l)"
-  dup="$(ar t "$dest/$name" | sort | uniq -d | wc -l)"
+  # `|| true` on each: these are measurements for the assertions below, and a failing
+  # grep or ar would otherwise end the script before any of those messages is printed.
+  want="$(grep -c . "$list" || true)"
+  got="$(ar t "$dest/$name" | wc -l || true)"
+  dup="$(ar t "$dest/$name" | sort | uniq -d | wc -l || true)"
   if [ "$staged" != "$want" ]; then
     echo "package_node: $name: the thin archive lists $want members but only $staged could be read." >&2
     exit 1
@@ -486,6 +488,10 @@ manifest = {
     'icu_version': variable('icu_ver_major'),
     'icu_data': 'compiled-in',
     'pointer_compression': variable('v8_enable_pointer_compression', '0'),
+    # Temporal is built from Rust in deps/crates and ./configure drops it quietly when
+    # cargo is missing, so the bundle states which way it went. Absent on older Node
+    # versions that never had it.
+    'temporal_support': variable('v8_enable_temporal_support', '0') == '1',
     'configure_args': [],
     'archives': {name: sha256(os.path.join(out_dir, name)) for name in archives},
     'sizes': {name: os.path.getsize(os.path.join(out_dir, name)) for name in archives},
@@ -499,6 +505,7 @@ with open(out_path, 'w', encoding='utf-8') as handle:
     handle.write('\n')
 print(f"package_node: manifest v8={v8_version} icu={manifest['icu_version']} "
       f"pointer_compression={manifest['pointer_compression']} "
+      f"temporal={manifest['temporal_support']} "
       f"archives={len(archives)}")
 PY
 

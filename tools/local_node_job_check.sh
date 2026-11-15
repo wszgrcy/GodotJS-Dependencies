@@ -75,13 +75,23 @@ if [ "$reuse_build" -eq 0 ]; then
   tar -xf "$tarball" -C "$build" --strip-components=1
 
   # What configure is about to receive has to be the committed file plus the
-  # version-specific extras, nothing more and nothing less.
+  # version-specific extras, plus only those flags prepare_node_build.sh may add
+  # itself (today: the Temporal switch). A flag nobody wrote down would otherwise ride
+  # into the published bundle unnoticed.
   cp "$args_file" "$build/args.txt"
   cp "$args_file" "$build/args.committed.txt"
   ( cd "$build" && bash "$repo/prepare_node_build.sh" . args.txt "$version" )
-  if [ -f "$extra" ]; then
-    diff -u <(flags "$build/args.committed.txt"; flags "$extra") <(flags "$build/args.txt")
+  expected="$( { flags "$build/args.committed.txt" || true; flags "$extra" || true; } | sort -u)"
+  actual="$(flags "$build/args.txt" | sort -u)"
+  extra_flags="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") \
+    | grep -vE '^--v8-(enable|disable)-temporal-support$' || true)"
+  if [ -n "$extra_flags" ]; then
+    echo "local_node_job_check: prepare_node_build.sh put flags in the args file that are" >&2
+    echo "  in neither the committed args file nor the extras file:" >&2
+    printf '  %s\n' $extra_flags >&2
+    exit 1
   fi
+  echo "local_node_job_check: args file = committed + extras (+ the Temporal switch prepare adds)"
 elif [ ! -d "$build/out/Release" ]; then
   echo "local_node_job_check: --reuse-build but $build/out/Release does not exist" >&2
   exit 1

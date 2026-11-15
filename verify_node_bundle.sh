@@ -142,10 +142,23 @@ if [ -n "${NODE_VERIFY_LINK_ONLY:-}" ]; then
 fi
 
 echo "verify_node_bundle: running the probe"
+# The manifest records whether this bundle was built with Temporal (Rust code in
+# deps/crates, dropped silently by ./configure when cargo is missing). The probe is
+# told what the manifest claims and fails if the live runtime says otherwise.
+temporal_expected="$(python3 - "$PLATFORM_DIR/manifest.json" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding='utf-8')).get('temporal_support')
+except (OSError, ValueError):
+    value = None
+print('yes' if value is True else 'no' if value is False else 'unknown')
+PY
+)"
+echo "verify_node_bundle: manifest says Temporal is ${temporal_expected}"
 # The probe must finish on its own; if it hangs, that is a failure, not a reason to
 # wait. UV_RUN_NOWAIT is used everywhere for exactly that reason.
 if command -v timeout >/dev/null; then
-  timeout "${NODE_PROBE_TIMEOUT:-180}" "$WORK/node_link_probe"
+  NODE_PROBE_TEMPORAL="$temporal_expected" timeout "${NODE_PROBE_TIMEOUT:-180}" "$WORK/node_link_probe"
 else
-  "$WORK/node_link_probe"
+  NODE_PROBE_TEMPORAL="$temporal_expected" "$WORK/node_link_probe"
 fi

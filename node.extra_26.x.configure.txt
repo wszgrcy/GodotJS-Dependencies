@@ -18,9 +18,14 @@
 # Two switches are deliberately left at Node's default instead of being turned
 # off: --without-amaro (Node's TypeScript stripper) and --without-sqlite. Neither
 # changes what an embedder links against, and keeping Node's default feature set
-# means the archives behave like the ones Node ships. The build needs no Rust
-# toolchain: Node 26's V8 is configured with v8_enable_temporal_support = 0 by
-# default, which is the only thing that would have pulled Rust in.
+# means the archives behave like the ones Node ships.
+#
+# Temporal is part of that default set too, and it is the one thing here that needs a
+# Rust toolchain: it is built from deps/crates (temporal_rs) with cargo. ./configure
+# enables it by default and, when cargo or rustc (>= 1.86) is missing, only warns and
+# produces a runtime without the Temporal API - so it is not switched off here, and
+# prepare_node_build.sh passes --v8-enable-temporal-support to make configure fail
+# instead of warning. See docs/node-26.md section 10.4.
 #
 # Node 26 is the current Active LTS ("Lithium", EOL April 2029) and ships V8
 # 14.6.202.34. That is lower than the V8 15.7 GodotJS pins, and that is accepted:

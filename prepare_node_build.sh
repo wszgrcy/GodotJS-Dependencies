@@ -31,16 +31,28 @@
 #      not want to export its whole symbol table for that. Set NODE_KEEP_RDYNAMIC=1
 #      if loading prebuilt .node addons matters more than symbol hygiene.
 #
-#   4. Applies nodejs/node#66804 ("build: use a single producer for shared generated
-#      files") unless the source already carries it. Without it a cross build cannot
-#      produce a ninja graph at all - the host toolset and the target toolset both
-#      claim the same generated file, and ninja refuses before compiling anything.
-#      Merged upstream on 2026-11-05 but not in any release through 26.13.1, so the
-#      patch is carried under patches/. Native builds are unaffected either way.
+#   4. Applies two upstream build fixes that no released Node has yet (the block that
+#      applies them says what each one is for). Both only matter for cross builds;
+#      native builds are unaffected either way.
+#
+#   5. Replaces MSBuild's $(Platform) in deps/crates/crates.gyp with a gyp variable.
+#      Node's own Windows build runs through gyp's MSVS generator, which expands
+#      $(Platform); this build uses ninja, and ninja reads '$' as an escape character,
+#      so it refuses the generated file before compiling anything.
+#
+#   6. Turns Temporal (the JS Temporal API, implemented in Rust under deps/crates)
+#      into an explicit decision. ./configure enables it by default and, when cargo or
+#      rustc is missing or too old, prints one warning line and builds a runtime
+#      without it - so a bundle built on the wrong machine silently behaves differently
+#      from Node's. Here it either fails the build or says out loud that it is off.
 #
 # Environment:
 #   NODE_KEEP_NO_RTTI=1    leave -fno-rtti alone
 #   NODE_KEEP_RDYNAMIC=1   leave -rdynamic alone
+#   NODE_TEMPORAL=off      build without Temporal. Only for a platform whose Rust
+#                          target cannot be built on this machine (for example before
+#                          cargo has an Android NDK linker configured).
+
 
 set -euo pipefail
 
@@ -122,7 +134,11 @@ fi
 # full-icu is Node's default, and it is the only ICU mode whose data has to come
 # with the source tree, so that is the case worth checking up front: a build that
 # gets to the ICU step and then finds no data file wastes the whole compile first.
-intl_arg="$(grep -oE '^[[:space:]]*--with-intl=[a-z-]+' "$ARGS_FILE" | head -1 | tr -d '[:space:]')"
+# These three greps look for arguments that the args file may legitimately not
+# contain (defaults are applied below them). With `set -o pipefail`, a grep that
+# matches nothing would otherwise end the script on its own, silently - and the
+# script would die before printing anything useful.
+intl_arg="$(grep -oE '^[[:space:]]*--with-intl=[a-z-]+' "$ARGS_FILE" | head -1 | tr -d '[:space:]' || true)"
 case "${intl_arg:---with-intl=full-icu}" in
   --with-intl=full-icu)
     if ! ls "$NODE_SRC"/deps/icu-small/source/data/in/icudt*l.dat* >/dev/null 2>&1; then
@@ -145,8 +161,8 @@ esac
 # are not set, nothing fails: the build quietly compiles host-architecture objects
 # into an archive named after the target platform, which only shows up when the
 # engine tries to link it. So check before a long build starts.
-dest_os="$(grep -oE '^[[:space:]]*--dest-os=[a-z]+' "$ARGS_FILE" | head -1 | cut -d= -f2 | tr -d '[:space:]')"
-dest_cpu="$(grep -oE '^[[:space:]]*--dest-cpu=[a-z0-9]+' "$ARGS_FILE" | head -1 | cut -d= -f2 | tr -d '[:space:]')"
+dest_os="$(grep -oE '^[[:space:]]*--dest-os=[a-z]+' "$ARGS_FILE" | head -1 | cut -d= -f2 | tr -d '[:space:]' || true)"
+dest_cpu="$(grep -oE '^[[:space:]]*--dest-cpu=[a-z0-9]+' "$ARGS_FILE" | head -1 | cut -d= -f2 | tr -d '[:space:]' || true)"
 
 require_cross_toolchain() {
   # $1 = label, $2 = hint shown on failure, $3 = which variables must be set.
@@ -218,52 +234,227 @@ case "${dest_os:-linux}" in
     ;;
 esac
 
-# --- one build fix no released Node has yet ------------------------------------
-# nodejs/node#66804: in a cross build the host toolset and the target toolset each
-# register the shared generated files, so ninja sees two producers for one output
-# and refuses before compiling anything:
+# --- what machine is this, and is it a cross build -----------------------------
+host_cpu="$(uname -m)"
+case "$host_cpu" in x86_64|amd64) host_cpu=x64 ;; aarch64|arm64) host_cpu=arm64 ;; esac
+host_os="$(uname -s)"
+case "$host_os" in
+  Linux) host_os=linux ;;
+  Darwin) host_os=mac ;;
+  MINGW*|MSYS*|CYGWIN*) host_os=win ;;
+esac
+cross_build=0
+if { [ -n "$dest_cpu" ] && [ "$dest_cpu" != "$host_cpu" ]; } ||
+   { [ -n "$dest_os" ] && [ "$dest_os" != "$host_os" ]; }; then
+  cross_build=1
+fi
+
+# --- upstream build fixes no released Node has yet ------------------------------
+# Both are merged upstream but land after 26.13.1, so they are carried under patches/.
 #
-#   ninja: error: obj.host/tools/v8_gypfiles/v8_inspector_headers.ninja:26:
-#   multiple rules generate gen/inspector-generated-output-root/src/js_protocol.stamp
+#   node-66804-single-producer.patch (nodejs/node#66804) - in a cross build the host
+#   toolset and the target toolset each register the shared generated files, so ninja
+#   sees two producers for one output and refuses before compiling anything:
 #
-# Verified on 26.13.1 with a same-OS cross configure (linux x86_64 host,
-# --dest-cpu=arm64): without the patch ninja refuses, with it the graph parses
-# (6523 targets), and a native configure still parses afterwards.
-CROSS_PATCH="$SCRIPT_DIR/patches/node-66804-single-producer.patch"
-if [ -f "$CROSS_PATCH" ]; then
-  if ! command -v git >/dev/null 2>&1; then
-    echo "prepare_node_build: git is needed to apply $CROSS_PATCH" >&2
+#     ninja: error: obj.host/tools/v8_gypfiles/v8_inspector_headers.ninja:26:
+#     multiple rules generate gen/inspector-generated-output-root/src/js_protocol.stamp
+#
+#   node-66823-rust-host-target.patch (nodejs/node#66823) - the same duplicate producer
+#   problem for the Rust archive Temporal is built from: one cargo action served both
+#   toolsets and both wanted the same node_crates path. The fix gives each toolset its
+#   own Rust target triple and output directory, and it is why a cross build now has to
+#   be told CARGO_BUILD_TARGET (see the Temporal block below).
+#
+# Both were checked on 26.13.1 with a same-OS cross configure (linux x86_64 host,
+# --dest-cpu=arm64): without them ninja refuses, with them the graph parses, and a
+# native configure still parses afterwards.
+apply_build_patch() {
+  # $1 patch file, $2 name used in the log, $3 = cross (needed for cross builds only)
+  # or always.
+  local patch="$1" label="$2" policy="$3" plain
+  if [ ! -f "$patch" ]; then
+    echo "prepare_node_build: $label: patch file not found at $patch" >&2
     exit 1
   fi
-  host_cpu="$(uname -m)"
-  case "$host_cpu" in x86_64|amd64) host_cpu=x64 ;; aarch64|arm64) host_cpu=arm64 ;; esac
-  host_os="$(uname -s)"
-  case "$host_os" in
-    Linux) host_os=linux ;;
-    Darwin) host_os=mac ;;
-    MINGW*|MSYS*|CYGWIN*) host_os=win ;;
-  esac
-  cross_build=0
-  if { [ -n "$dest_cpu" ] && [ "$dest_cpu" != "$host_cpu" ]; } ||
-     { [ -n "$dest_os" ] && [ "$dest_os" != "$host_os" ]; }; then
-    cross_build=1
-  fi
-  if ( cd "$NODE_SRC" && git apply --check -p1 "$CROSS_PATCH" ) >/dev/null 2>&1; then
-    ( cd "$NODE_SRC" && git apply -p1 "$CROSS_PATCH" )
-    echo "prepare_node_build: applied nodejs/node#66804 (single producer for shared generated files)"
-  elif ( cd "$NODE_SRC" && git apply --reverse --check -p1 "$CROSS_PATCH" ) >/dev/null 2>&1; then
-    echo "prepare_node_build: nodejs/node#66804 is already in this Node source"
-  elif [ "$cross_build" = 1 ]; then
-    echo "prepare_node_build: this is a cross build ($host_os/$host_cpu -> ${dest_os:-same os}/${dest_cpu:-same cpu})" >&2
-    echo "  and $CROSS_PATCH fits neither forward nor in reverse, so ninja would stop" >&2
-    echo "  with 'multiple rules generate ...'. Either this Node version already" >&2
-    echo "  carries nodejs/node#66804 in a changed form, or the patch needs updating." >&2
+  # A checkout on Windows converts text files to CRLF (core.autocrlf=true is that
+  # platform's default), and git then reads the patch as garbage: neither the forward
+  # nor the reverse check fits, which is indistinguishable from an out-of-date patch.
+  # Apply a copy with the carriage returns taken out.
+  plain="$(mktemp)"
+  tr -d '\r' < "$patch" > "$plain"
+  if ( cd "$NODE_SRC" && git apply --check -p1 "$plain" ) >/dev/null 2>&1; then
+    ( cd "$NODE_SRC" && git apply -p1 "$plain" )
+    echo "prepare_node_build: applied $label"
+  elif ( cd "$NODE_SRC" && git apply --reverse --check -p1 "$plain" ) >/dev/null 2>&1; then
+    echo "prepare_node_build: $label is already in this Node source"
+  elif [ "$policy" = always ] || [ "$cross_build" = 1 ]; then
+    echo "prepare_node_build: $label fits neither forward nor in reverse." >&2
+    echo "  This is a cross build ($host_os/$host_cpu -> ${dest_os:-same os}/${dest_cpu:-same cpu})," >&2
+    echo "  so without this fix ninja stops with 'multiple rules generate ...'. Either" >&2
+    echo "  this Node version carries it in a changed form, or $patch needs updating." >&2
+    rm -f "$plain"
     exit 1
   else
-    echo "prepare_node_build: nodejs/node#66804 fits neither way; a native build does"
-    echo "  not need it, so continuing."
+    echo "prepare_node_build: $label does not apply to this Node source; a native build"
+    echo "  does not need it, so continuing."
   fi
+  rm -f "$plain"
+}
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "prepare_node_build: git is needed to apply the patches under patches/" >&2
+  exit 1
 fi
+apply_build_patch "$SCRIPT_DIR/patches/node-66804-single-producer.patch" \
+                  "nodejs/node#66804 (single producer for shared generated files)" cross
+apply_build_patch "$SCRIPT_DIR/patches/node-66823-rust-host-target.patch" \
+                  "nodejs/node#66823 (per-toolset Rust archives for Temporal cross builds)" cross
+
+# --- MSBuild's $(Platform) cannot survive into a ninja file ---------------------
+# deps/crates/crates.gyp builds the Rust side of Temporal. On Windows it names the
+# output directory and passes the platform to deps/crates/cargo_build.py with
+# $(Platform), which is an MSBuild variable: gyp expands it only for the MSVS
+# generator that ./vcbuild.bat uses, and with --ninja it reaches the .ninja file as
+# written, where '$' is an escape character:
+#
+#   ninja: error: obj\deps\crates\node_crates.ninja:19: bad $-escape
+#     (literal $ must be written as $$)
+#         "cargo_build.py" "$(Platform)" "..\..\out\Release\gen" "--release"...
+#
+# Node's own Windows CI does not use ninja, which is why this is still upstream's and
+# not a fixed thing. gyp's ninja generator even asserts that a path holds no '$'
+# (AssertionError: .../gen/$(Platform)/release/node_crates.lib), so the same source
+# fails in two places depending on where the '$' lands.
+#
+# <(target_arch) is 'x64' or 'arm64' on Windows - exactly the two values
+# cargo_build.py's platform argument accepts, and the directory it copies
+# node_crates.lib into - so the action and the library path stay a matching pair.
+python3 - "$NODE_SRC/deps/crates/crates.gyp" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+if not path.exists():
+    print('prepare_node_build: no deps/crates/crates.gyp here, nothing to patch')
+    sys.exit(0)
+
+text = path.read_text(encoding='utf-8')
+count = text.count('$(Platform)')
+if count == 0:
+    print('prepare_node_build: crates.gyp has no MSBuild $(Platform) left, nothing to do')
+    sys.exit(0)
+
+path.write_text(text.replace('$(Platform)', '<(target_arch)'), encoding='utf-8')
+left = path.read_text(encoding='utf-8').count('$(Platform)')
+if left:
+    print(f'prepare_node_build: {left} $(Platform) still in crates.gyp after patching',
+          file=sys.stderr)
+    sys.exit(1)
+print(f'prepare_node_build: patched crates.gyp: {count} x $(Platform) -> <(target_arch)')
+PY
+
+# --- Temporal: the Rust part of V8 must not be dropped by accident --------------
+# Temporal is a JavaScript API, implemented in Rust under deps/crates, and ./configure
+# enables it by default. If cargo or rustc is missing it prints one line and carries on
+# without it:
+#
+#   warn: cargo not found! Support for Temporal will be disabled.
+#
+# The result is a bundle from the same source whose `Temporal` global does not exist,
+# which is a runtime discovery rather than a build one, and it is exactly what happens
+# on a machine that has no Rust toolchain installed. So the flag is passed explicitly:
+# with --v8-enable-temporal-support, configure stops with an error instead of warning.
+# A cross build needs CARGO_BUILD_TARGET as well, for the same reason and with the same
+# silent default, since nodejs/node#66823.
+case "${NODE_TEMPORAL:-on}" in
+  on)
+    if grep -qE '^[[:space:]]*--v8-disable-temporal-support' "$ARGS_FILE"; then
+      echo "prepare_node_build: $ARGS_FILE already passes --v8-disable-temporal-support," >&2
+      echo "  which contradicts building with Temporal. Remove that line, or run with" >&2
+      echo "  NODE_TEMPORAL=off to build without it on purpose." >&2
+      exit 1
+    fi
+    if ! grep -qE '^[[:space:]]*--v8-enable-temporal-support' "$ARGS_FILE"; then
+      printf '%s\n' '--v8-enable-temporal-support' >> "$ARGS_FILE"
+    fi
+
+    version_ok() {
+      # $1 = command, $2 = minimum as MAJOR.MINOR. Both print "tool 1.93.1 (...)".
+      local tool="$1" min="$2" line major minor min_major min_minor
+      line="$("$tool" --version 2>/dev/null | head -1 || true)"
+      major="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+' | head -1 | cut -d. -f1 || true)"
+      minor="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+' | head -1 | cut -d. -f2 || true)"
+      min_major="${min%.*}"
+      min_minor="${min#*.}"
+      if [ -z "$major" ] || [ -z "$minor" ]; then
+        return 1
+      fi
+      if [ "$major" -gt "$min_major" ] ||
+         { [ "$major" -eq "$min_major" ] && [ "$minor" -ge "$min_minor" ]; }; then
+        return 0
+      fi
+      return 1
+    }
+
+    cargo_bin="${CARGO:-cargo}"
+    rustc_bin="${RUSTC:-rustc}"
+    for tool in "$cargo_bin" "$rustc_bin"; do
+      if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "prepare_node_build: '$tool' is not installed, and Temporal needs it." >&2
+        echo "  configure would warn and build a runtime without the Temporal API. Install" >&2
+        echo "  a Rust toolchain (cargo and rustc 1.86 or newer, per BUILDING.md), or set" >&2
+        echo "  NODE_TEMPORAL=off to build without Temporal on purpose." >&2
+        exit 1
+      fi
+      if ! version_ok "$tool" 1.86; then
+        echo "prepare_node_build: $($tool --version 2>/dev/null | head -1) is too old for" >&2
+        echo "  Temporal (needs cargo and rustc 1.86 or newer). configure would warn and" >&2
+        echo "  build without it; set NODE_TEMPORAL=off if that is what is wanted." >&2
+        exit 1
+      fi
+    done
+
+    cargo_line="$("$cargo_bin" --version 2>/dev/null | head -1 || true)"
+    if [ "$cross_build" = 1 ]; then
+      if [ -z "${CARGO_BUILD_TARGET:-}" ]; then
+        echo "prepare_node_build: this is a cross build, so configure needs" >&2
+        echo "  CARGO_BUILD_TARGET set to the Rust target triple of the target platform" >&2
+        echo "  (for example aarch64-unknown-linux-gnu, x86_64-apple-darwin," >&2
+        echo "  aarch64-apple-ios, aarch64-linux-android). Without it, configure warns and" >&2
+        echo "  builds without Temporal. Set NODE_TEMPORAL=off to do that on purpose." >&2
+        exit 1
+      fi
+      # rustc happily prints a libdir for a target that is not installed, so the
+      # directory has to be looked at; installing it is `rustup target add <triple>`.
+      if [ ! -d "$("$rustc_bin" --print target-libdir --target "$CARGO_BUILD_TARGET" 2>/dev/null)" ]; then
+        echo "prepare_node_build: the Rust target '$CARGO_BUILD_TARGET' is not installed" >&2
+        echo "  for $rustc_bin, so cargo could not build Temporal for it." >&2
+        echo "  Install it (rustup target add $CARGO_BUILD_TARGET) or set NODE_TEMPORAL=off." >&2
+        exit 1
+      fi
+      echo "prepare_node_build: Temporal on, $cargo_line, Rust target $CARGO_BUILD_TARGET"
+    else
+      echo "prepare_node_build: Temporal on, $cargo_line"
+    fi
+    ;;
+  off)
+    if grep -qE '^[[:space:]]*--v8-enable-temporal-support' "$ARGS_FILE"; then
+      echo "prepare_node_build: $ARGS_FILE passes --v8-enable-temporal-support, which" >&2
+      echo "  asks configure to fail when Temporal cannot be built - the opposite of" >&2
+      echo "  NODE_TEMPORAL=off. Remove that line, or unset NODE_TEMPORAL." >&2
+      exit 1
+    fi
+    if ! grep -qE '^[[:space:]]*--v8-disable-temporal-support' "$ARGS_FILE"; then
+      printf '%s\n' '--v8-disable-temporal-support' >> "$ARGS_FILE"
+    fi
+    echo "prepare_node_build: NODE_TEMPORAL=off - this bundle has NO JavaScript Temporal"
+    echo "  API; the published notes for this bundle have to say so."
+    ;;
+  *)
+    echo "prepare_node_build: NODE_TEMPORAL must be 'off' or unset (got '$NODE_TEMPORAL')." >&2
+    exit 2
+    ;;
+esac
 
 # --- RTTI and -rdynamic in common.gypi -----------------------------------------
 python3 - "$NODE_SRC/common.gypi" "${NODE_KEEP_NO_RTTI:-0}" "${NODE_KEEP_RDYNAMIC:-0}" <<'PY'
