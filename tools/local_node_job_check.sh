@@ -63,14 +63,9 @@ stage="$work/stage"
 started="$(date +%s)"
 
 # One argument per line, `#` starts a comment: the same rule the args files use.
+# Arguments are appended to arrays with a read loop rather than mapfile, and no
+# bash nameref is used, so this also runs on the bash 3.2 that macOS ships.
 flags() { grep -vE '^[[:space:]]*(#|$)' "$1"; }
-read_flags() {
-  # read_flags <array-name> <file> - append a file's arguments to an array.
-  local -n dest="$1"
-  while IFS= read -r line; do
-    dest+=("$line")
-  done < <(flags "$2")
-}
 
 extra="$repo/node.extra_${version%%.*}.x.configure.txt"
 
@@ -104,9 +99,13 @@ for candidate in "$repo"/node.*.configure.txt; do
     extra*) continue ;;
   esac
   probe_args=()
-  read_flags probe_args "$candidate"
+  while IFS= read -r line; do
+    probe_args+=("$line")
+  done < <(flags "$candidate")
   if [ -f "$extra" ]; then
-    read_flags probe_args "$extra"
+    while IFS= read -r line; do
+      probe_args+=("$line")
+    done < <(flags "$extra")
   fi
   case "$name" in
     windows_*) probe_args+=("--clang-cl=19.1.5") ;;
@@ -123,7 +122,10 @@ done
 if [ "$reuse_build" -eq 0 ]; then
   (
     cd "$build"
-    mapfile -t node_args < <(grep -vE '^[[:space:]]*(#|$)' args.txt)
+    node_args=()
+    while IFS= read -r node_arg; do
+      node_args+=("$node_arg")
+    done < <(flags "$build/args.txt")
     printf 'configure %s\n' "${node_args[*]}"
     python3 ./configure "${node_args[@]}"
     ninja -C out/Release node

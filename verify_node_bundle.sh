@@ -60,19 +60,34 @@ for required in "$BUNDLE/node/include/node/node.h" "$BUNDLE/node/include/node/v8
 done
 
 # Turn link.txt into a link line: consecutive 'whole' entries are wrapped in one
-# --whole-archive group, everything else keeps the recorded order.
+# whole-archive group, everything else keeps the recorded order. This is the one
+# place the two linker families really differ: GNU ld opens a group with
+# --whole-archive and closes it with --no-whole-archive, while Apple's ld64 has no
+# group at all and takes -force_load once per archive. The archives, their order
+# and everything else are the same either way.
 LINK_ARGS=()
 WHOLE=()
 CPPFLAGS_EXTRA=()
+case "$(uname -s)" in
+  Darwin) LINK_STYLE=apple ;;
+  *) LINK_STYLE=gnu ;;
+esac
 flush_whole() {
-  if [ "${#WHOLE[@]}" -gt 0 ]; then
+  if [ "${#WHOLE[@]}" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$LINK_STYLE" = apple ]; then
+    for file in "${WHOLE[@]}"; do
+      LINK_ARGS+=("-Wl,-force_load,$PLATFORM_DIR/$file")
+    done
+  else
     LINK_ARGS+=(-Wl,--whole-archive)
     for file in "${WHOLE[@]}"; do
       LINK_ARGS+=("$PLATFORM_DIR/$file")
     done
     LINK_ARGS+=(-Wl,--no-whole-archive)
-    WHOLE=()
   fi
+  WHOLE=()
 }
 while read -r kind arg _; do
   case "$kind" in

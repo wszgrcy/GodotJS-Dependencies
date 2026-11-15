@@ -159,6 +159,11 @@ jobs:
               # so a failure says whether the image is behind.
               xcodebuild -version
               ninja --version
+              # The image's only bash is 3.2, so install a modern one and let the
+              # later steps run with it (docs/node-26.md section 9.1). Not fatal on
+              # purpose: /bin/bash stays as the fallback, and every script here is
+              # written so it also runs on 3.2.
+              brew install bash || echo "brew install bash failed; continuing with /bin/bash 3.2"
               ;;
             windows)
               # From Node 24 on, Windows is built with clang-cl, which is an
@@ -186,6 +191,102 @@ jobs:
                 *)
                   echo "cannot read a version out of clang-cl --version"
                   exit 1
+                  ;;
+              esac
+
+              # gyp's ninja generator works out which Visual Studio to use by reading
+              # the registry, and on a runner that answer can come back empty even
+              # though Visual Studio is installed - configure then stops with
+              # "Could not locate Visual Studio installation." before compiling
+              # anything. clang-cl does not get around it: the headers, import
+              # libraries and Windows SDK still come from Visual Studio, and gyp is
+              # the one that runs vcvarsall.bat for every compile rule. So the path is
+              # handed to gyp instead (GYP_MSVS_OVERRIDE_PATH makes it skip the probe).
+              # V8's own build does exactly this: build/vs_toolchain.py and
+              # build/toolchain/win/setup_toolchain.py set GYP_MSVS_OVERRIDE_PATH
+              # themselves, because a VS 2017-or-newer install location is officially
+              # meant to be found through COM/vswhere rather than the registry.
+              vswhere_win="$(cmd.exe /c 'echo %ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe' | tr -d '\r' | tail -1)"
+              vswhere="$(cygpath -u "$vswhere_win" 2>/dev/null || echo "$vswhere_win")"
+              vs_path=""
+              vs_name=""
+              if [ -f "$vswhere" ]; then
+                vs_query=("$vswhere" -latest -products '*'
+                  -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64)
+                vs_path="$("${vs_query[@]}" -property installationPath | tr -d '\r' | head -1)"
+                case "$("${vs_query[@]}" -property installationVersion \
+                         | tr -d '\r' | head -1 | cut -d. -f1)" in
+                  15) vs_name=2017 ;;
+                  16) vs_name=2019 ;;
+                  17) vs_name=2022 ;;
+                  18) vs_name=2026 ;;
+                esac
+              else
+                echo "no vswhere at $vswhere_win, falling back to install paths"
+              fi
+              if [ -z "$vs_path" ]; then
+                # No vswhere, or vswhere had no answer. Walk the same directories
+                # Chromium's vs_toolchain.py walks: a vs<year>_install hint, then one
+                # directory per edition.
+                pf="$(cmd.exe /c 'echo %ProgramFiles%' | tr -d '\r' | tail -1)"
+                pf86="$(cmd.exe /c 'echo %ProgramFiles(x86)%' | tr -d '\r' | tail -1)"
+                for entry in "2026|$pf/Microsoft Visual Studio/18" \
+                             "2022|$pf/Microsoft Visual Studio/2022" \
+                             "2019|$pf86/Microsoft Visual Studio/2019" \
+                             "2017|$pf86/Microsoft Visual Studio/2017"; do
+                  vs_name="${entry%%|*}"
+                  root="${entry#*|}"
+                  hint="$(printenv "vs${vs_name}_install" 2>/dev/null || true)"
+                  for candidate in "$hint" "$root/Enterprise" "$root/Professional" \
+                                   "$root/Community" "$root/Preview" \
+                                   "$root/Insiders" "$root/BuildTools"; do
+                    [ -n "$candidate" ] || continue
+                    probe="$(cygpath -u "$candidate" 2>/dev/null || echo "$candidate")"
+                    if [ -f "$probe/VC/Auxiliary/Build/vcvarsall.bat" ]; then
+                      vs_path="$candidate"
+                      break 2
+                    fi
+                  done
+                done
+              fi
+              case "$vs_path" in
+                "")
+                  echo "Neither vswhere ($vswhere_win) nor the usual install"
+                  echo "directories turned up a Visual Studio with a C++ toolchain."
+                  if [ -f "$vswhere" ]; then
+                    echo "What vswhere does see:"
+                    "$vswhere" -products '*' -property displayName
+                  fi
+                  exit 1
+                  ;;
+              esac
+              {
+                echo "GYP_MSVS_OVERRIDE_PATH=$vs_path"
+                echo "GYP_MSVS_VERSION=$vs_name"
+              } >> "$GITHUB_ENV"
+              echo "gyp will use $vs_name at $vs_path"
+
+              # OpenSSL's assembler. configure only asks for nasm on x86/x64, and
+              # when it finds none it prints a warning and quietly builds OpenSSL
+              # without asm (configure.py turns a missing nasm into openssl_no_asm=1),
+              # which leaves this bundle different from Node's own Windows build and
+              # the log says nothing more than WARNING. So install it and refuse to
+              # continue if it still cannot be run.
+              case "$NODE_ARCH" in
+                x86_64)
+                  if command -v nasm >/dev/null 2>&1; then
+                    nasm -v
+                  else
+                    choco install nasm -y --no-progress
+                    echo 'C:\Program Files\NASM' >> "$GITHUB_PATH"
+                    "/c/Program Files/NASM/nasm.exe" -v || {
+                      echo "nasm installed but is not runnable from /c/Program Files/NASM."
+                      exit 1
+                    }
+                  fi
+                  ;;
+                *)
+                  echo "nasm is only consulted for x86 and x64; skipping for $NODE_ARCH"
                   ;;
               esac
               ;;
@@ -273,7 +374,22 @@ jobs:
               ;;
           esac
 
+          # Every later step runs through this shell. macOS gets the Homebrew bash
+          # installed above when it is there; everywhere else (and macOS if that
+          # install failed) keeps the runner default, which is the only bash the image
+          # guarantees. A custom shell path gets no default flags from the runner, so
+          # the ones it normally passes for `shell: bash` are spelled out - otherwise
+          # the two choices would differ in set -e and pipefail.
+          if [ "$NODE_PLATFORM" = macos ] && [ -x /opt/homebrew/bin/bash ]; then
+            /opt/homebrew/bin/bash --version | head -1
+            echo "NODE_CI_BASH=/opt/homebrew/bin/bash" >> "$GITHUB_ENV"
+          else
+            bash --version | head -1
+            echo "NODE_CI_BASH=bash" >> "$GITHUB_ENV"
+          fi
+
       - name: Fetch Node source
+        shell: ${{ env.NODE_CI_BASH }} --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
           curl -fL -o node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz"
@@ -282,6 +398,7 @@ jobs:
           df -h . || true
 
       - name: Build Node
+        shell: ${{ env.NODE_CI_BASH }} --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
           cd node
@@ -295,7 +412,12 @@ jobs:
           fi
 
           # One argument per line, comments dropped. Same rule as the args files.
-          mapfile -t NODE_ARGS < <(grep -vE '^[[:space:]]*(#|$)' args.txt)
+          # Written as a read loop because the macOS runner's /bin/bash is 3.2 and
+          # has no mapfile (that step failed with "mapfile: command not found").
+          NODE_ARGS=()
+          while IFS= read -r node_arg; do
+            NODE_ARGS+=("$node_arg")
+          done < <(grep -vE '^[[:space:]]*(#|$)' args.txt)
           printf 'configure %s\n' "${NODE_ARGS[*]}"
           python3 ./configure "${NODE_ARGS[@]}"
 
@@ -332,6 +454,7 @@ jobs:
           fi
 
       - name: Package
+        shell: ${{ env.NODE_CI_BASH }} --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
           # A failure here is usually "No space left on device" while copying a
@@ -349,9 +472,11 @@ jobs:
         # The probe compiles and runs on POSIX toolchains; on Windows the package
         # step is still checked, the link test is left to a local run.
         if: ${{ matrix.entry.platform != 'windows' }}
+        shell: ${{ env.NODE_CI_BASH }} --noprofile --norc -e -o pipefail {0}
         run: bash Scripts/verify_node_bundle.sh staging
 
       - name: What came out
+        shell: ${{ env.NODE_CI_BASH }} --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
           du -sh staging/node/* || true

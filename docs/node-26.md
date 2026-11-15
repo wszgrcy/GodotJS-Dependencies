@@ -87,7 +87,7 @@ build.
 | `verify_node_bundle.sh` | compiles and runs `tools/node_link_probe.cc` against a bundle |
 | `tools/node_link_probe.cc` | the program that proves a bundle is usable (see section 7) |
 | `tools/node_v8_version.sh` | prints the V8 version a Node version embeds, so the standalone V8 bundle can be built at the same one |
-| `tools/local_node_job_check.sh` | replays one desktop job of `build_node.yml` on your own machine (unpack, prepare, configure, ninja, package, verify) |
+| `tools/local_node_job_check.sh` | replays one desktop job of `build_node.yml` on your own machine (unpack, prepare, configure, ninja, package, verify), and first parse-checks every platform's `configure.txt` against `node`'s own `configure --help` |
 | `.github/workflows/build_node.yml` | one matrix job per platform/arch, called by `build_all.yml` |
 
 Before changing any of these scripts, run the local replay instead of pushing and
@@ -245,6 +245,12 @@ that is for `Temporal`, and Node 26's V8 is configured with
 Windows files add `--clang-cl`: since Node 24, the documented Windows toolchain is
 clang-cl, which is an optional Visual Studio component (`VC.Llvm.Clang` plus
 `VC.Llvm.ClangToolset`), and the CI job says so when the component is missing.
+The option's value is the LLVM version, so it has to be written
+`--clang-cl=19.1.5`; a bare `--clang-cl` stops configure with
+`argument --clang-cl: expected one argument` before anything is built. The version
+belongs to the machine, so it is not in the args file: the job reads
+`clang-cl --version` and appends the flag, which is what Node's own `vcbuild.bat`
+does. Building by hand on Windows means adding it yourself.
 `--dest-os` is spelled Node's way: `linux`, `mac`, `win`.
 
 ### Mobile: Android and iOS, cross-compiled despite upstream's "not supported"
@@ -502,15 +508,14 @@ what the bundle says.
 - **Only Linux x86_64 was built and run end to end, and only on this machine.**
   `tools/local_node_job_check.sh` replays the whole job here and ends in
   `node_link_probe: PASS`. In CI (run 43679251682) both Linux entries compiled all
-  4395 targets and then failed in the `Package` step, and the macOS and Windows
-  entries failed in `Build Node`; the reason is not known, because the Actions
-  logs need repository admin rights to download. The Linux failure is a strong
-  hint of a full disk - the object files alone are several GB, and the runner
-  images are tight - so `ninja` output is now deleted before packaging and both
-  steps print `df -h`. The macOS and Windows paths have still never been executed:
-  they use the same scripts and arguments, but `verify_node_bundle.sh` is
-  POSIX-only (it calls `c++` with GNU link flags) and the Windows job packages
-  without verifying. Linux arm64 is a native runner but was not run locally either.
+  4395 targets and then failed in the `Package` step, and that one is still
+  unexplained - a full disk is the likely cause (the object files alone are several
+  GB), so the job now deletes them before packaging and both steps print `df -h`.
+  The macOS and Windows entries each died for their own reason, and all of those
+  reasons are section 9 material: `--clang-cl` needs a value, the macOS runner's shell
+  has no `mapfile`, gyp has to be told where Visual Studio is, and a missing nasm was
+  quietly dropping OpenSSL's assembly. Neither path has reached `Package` on a runner
+  yet, and Linux arm64 was not built locally either.
 - **Mobile is coded, not compiled.** Android and iOS cross builds exist (section 6)
   and are gated behind `NODE_ANDROID` / `NODE_IOS` because neither has been run yet;
   today GodotJS still links the standalone V8 bundle on both. The V8 bundle therefore
@@ -529,3 +534,130 @@ what the bundle says.
   here (`InitializationResult`, `CommonEnvironmentSetup`) carries Node's own note
   that it can change without deprecation, so this whole file has to be re-checked
   on every Node major bump, not just patched.
+
+## 9. Runner constraints the scripts have to respect
+
+Two rules that come from the build machines rather than from Node. Both were found
+by failing in CI.
+
+### 9.1 macOS only guarantees bash 3.2
+
+macOS ships `/bin/bash` 3.2 - the version number has not moved since Mac OS X 10.3
+(the reported reason is bash 4 moving to GPLv3, which Apple does not ship; treat that
+motivation as background, the version itself is the measurable fact). That 3.2 is what
+a workflow step runs with, and the runner image does not install a newer one.
+`mapfile`, `readarray`, nameref (`local -n`) and associative arrays are bash 4, so a
+step that uses one dies at that line:
+
+```text
+prepare_node_build: done
+/Users/runner/work/_temp/....sh: line 7: mapfile: command not found
+##[error]Process completed with exit code 127.
+```
+
+Exit 127 together with "command not found" for something that is a shell builtin is
+the signature of this mistake. Anything in this repository that a macOS runner
+executes sticks to bash 3.2: an array is filled with
+`while IFS= read -r line; do arr+=("$line"); done < <(...)`, which is how
+`build_node.yml` reads a `configure.txt` and how `tools/local_node_job_check.sh`
+reads one, so the same script also runs on a developer's Mac.
+
+Two alternatives are in wider use, and both are reasonable if a script ever needs a
+bash 4 feature: install a newer bash and name it
+(`brew install bash`, `shell: /opt/homebrew/bin/bash`), or keep the shell thin and
+put the logic in Python. Godot's own macOS CI takes the second route - its macOS
+steps are `shell: sh` and the real work lives in Python scripts under
+`misc/scripts/`. `gode`, which is the reference for the Node bundle layout, has no
+macOS job at all, so it is no guide here.
+
+Nothing here has been deprecated away, which is worth stating because "2009" invites
+the opposite assumption. Checked against first-hand sources on 2026-11-15:
+
+- the image our job ran on (`macos-26-arm64`, image version 20261102.0473) lists
+  `Bash 3.2.57(1)-release` as its only bash, in
+  `images/macos/macos-26-arm64-Readme.md` of `actions/runner-images`; the same line
+  appears in the macos-15 image, so it has not moved for years;
+- the Actions runner runs a `shell: bash` step as
+  `/bin/bash --noprofile --norc -e -o pipefail {0}` - visible in the job log;
+- Node's own CI (`.github/workflows/build-shared.yml` in nodejs/node) uses
+  `shell: bash` and keeps the step to `python3 ./configure` plus `make`, with no bash 4
+  constructs;
+- Homebrew's CI (`.github/workflows/tests.yml`) runs on `macos-26` with
+  `shell: bash -xeuo pipefail {0}` and never installs another bash.
+
+So the mainstream answer is "write for the bash that is there", and the two escape
+hatches above are for scripts that genuinely want bash 4 features.
+
+What this repository does: the `node` workflow installs a modern bash on macOS
+(`brew install bash`, and a failure there is not fatal), and every step after the
+toolchain step runs through `NODE_CI_BASH` - the Homebrew bash when it is present,
+the runner default otherwise - with the runner's own flags spelled out, because a
+custom shell path gets no default flags from the runner. The scripts stay 3.2-safe,
+so the fallback is a working fallback rather than a second way to fail.
+
+### 9.2 `--whole-archive` is GNU ld syntax only
+
+GNU ld opens a group with `-Wl,--whole-archive` and closes it with
+`-Wl,--no-whole-archive`. Apple's ld64 has no group and takes `-force_load` once per
+archive; MSVC uses `/WHOLEARCHIVE:<lib>`. That matters in both directions:
+
+- `package_node.sh` works out the force-load set from Node's own link command, so a
+  macOS or Windows link line can arrive with no group marker at all. Instead of
+  recording nothing, it then records the six archives Node always force-loads (the
+  same six as section 4) and says so in the log, and it recognises
+  `/WHOLEARCHIVE:<lib>` tokens too. Checked by deleting the two marker lines from
+  this machine's link command and repacking: same result as the marked-up version
+  (6 force-load, 30 plain) and the probe still reports `PASS`.
+- `verify_node_bundle.sh` builds the link line according to `uname -s`:
+  `-Wl,-force_load,<archive>` per archive on Darwin, the `--whole-archive` group
+  everywhere else. The Linux path is unchanged.
+
+An embedder reading `link.txt` has the same choice to make, and the bundle does not
+say which linker family the consumer uses - see section 7.
+
+### 9.3 Windows: gyp has to be told where Visual Studio is
+
+```text
+  File "...\tools\gyp\pylib\gyp\MSVSVersion.py", line 601, in SelectVisualStudioVersion
+    raise ValueError("Could not locate Visual Studio installation.")
+```
+
+gyp's Windows generator finds the compiler by reading the registry
+(`msvs_emulation.GetVSVersion` → `MSVSVersion.SelectVisualStudioVersion`), and when the
+registry does not answer it gives up - on a machine that does have Visual Studio.
+clang-cl does not avoid this: the headers, import libraries and Windows SDK still
+come from Visual Studio, and gyp is what runs `vcvarsall.bat` for every compile rule.
+
+Passing the path in is the established answer, not an invention here. V8's own build
+sets `GYP_MSVS_OVERRIDE_PATH` itself (`build/vs_toolchain.py`, and
+`build/toolchain/win/setup_toolchain.py` does the same), precisely because a VS 2017
+or newer install location is meant to be found through COM rather than the registry -
+that is why the V8 Windows jobs never meet this error. depot_tools reaches the same
+conclusion with `vswhere -prerelease` in `win_toolchain/package_from_installed.py`.
+So the Windows job asks `vswhere` - Microsoft's own locator, shipped with the Visual
+Studio installer - and hands gyp
+`GYP_MSVS_OVERRIDE_PATH=<installationPath>` plus `GYP_MSVS_VERSION=<name>`, where the
+name has to match the major (15 → 2017, 16 → 2019, 17 → 2022, 18 → 2026). With the
+override set, gyp skips the registry probe altogether.
+
+If vswhere is missing or answers nothing, the job walks the same install directories
+Chromium's `vs_toolchain.py` walks: a `vs<year>_install` environment hint, then one
+directory per edition (`Enterprise`, `Professional`, `Community`, `Preview`,
+`Insiders`, `BuildTools`) under the per-year install root, accepting a directory only
+when `VC\Auxiliary\Build\vcvarsall.bat` is really there. Checked by pointing it at
+fake trees: newest edition wins, an `vs2026_install` hint wins over everything, and
+when nothing exists the search comes back empty and the step fails with vswhere's list
+of installed products rather than falling through to configure.
+
+### 9.4 A missing nasm changes the Windows bundle without saying so
+
+```text
+WARNING: No acceptable ASM compiler found!
+```
+
+That warning is not harmless. On x86 and x64 `configure.py` asks for `nasm`, and when
+there is none it sets `openssl_no_asm=1`, so OpenSSL is compiled without its assembly -
+the bundle is then slower at crypto than Node's own Windows build, and the log only
+says "WARNING". The Windows job installs nasm and stops if it still cannot be run.
+Writing `--openssl-no-asm` into the args file is the alternative when that install is
+not wanted; what must not happen is the build choosing it because a tool was missing.

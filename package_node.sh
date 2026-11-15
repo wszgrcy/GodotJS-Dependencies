@@ -106,14 +106,34 @@ tokens_path, whole_path, plain_path, system_path = sys.argv[1:5]
 tokens = [line.strip() for line in open(tokens_path, encoding='utf-8') if line.strip()]
 
 whole, plain, system = [], [], set()
-group = []            # where archives go; swapped by --whole-archive markers
+group = plain         # archives before any marker are ordinary archives
 seen_whole, seen_plain = set(), set()
 expect_framework = False
+
+# Without a marker in the link line, these are the archives to force-load. The
+# requirement comes from Node's own build (builtins, snapshot, zlib and libuv
+# initializers live in objects nothing else references), not from the linker - but
+# only GNU ld spells it as a group. ld64 uses -force_load per archive and MSVC
+# uses /WHOLEARCHIVE:, so the token list can arrive with no group marker at all,
+# and then an embedder would silently get a bundle missing its initializers.
+FALLBACK_WHOLE = ['libnode_base.a', 'libv8_base_without_compiler.a', 'libzlib.a',
+                  'libuv.a', 'libv8_snapshot.a', 'libopenssl.a']
 
 def is_our_archive(token):
     # Our archives come with a path (obj/deps/uv/libuv.a); a toolchain library is
     # a bare name (ws2_32.lib, and on Linux those arrive as -lws2_32 instead).
     return (token.endswith('.a') or token.endswith('.lib')) and ('/' in token or '\\' in token)
+
+def add_archive(token, target=None):
+    name = token.replace('\\', '/').rsplit('/', 1)[-1]
+    where = group if target is None else target
+    if name in seen_whole or name in seen_plain:
+        return          # already recorded, whichever group it went to
+    if where is plain:
+        seen_plain.add(name)
+    else:
+        seen_whole.add(name)
+    where.append(name)
 
 for token in tokens:
     if token == '-Wl,--whole-archive':
@@ -121,6 +141,11 @@ for token in tokens:
         continue
     if token == '-Wl,--no-whole-archive':
         group = plain
+        continue
+    if token.startswith('/WHOLEARCHIVE:'):
+        # MSVC's spelling (not yet exercised on a runner): the archive follows the
+        # colon, and it is force-loaded on its own.
+        add_archive(token.split(':', 1)[1], whole)
         continue
     if token == '-framework':
         expect_framework = True
@@ -130,22 +155,24 @@ for token in tokens:
         expect_framework = False
         continue
     if is_our_archive(token):
-        name = token.replace('\\', '/').rsplit('/', 1)[-1]
-        if name in seen_whole:
-            continue                  # already forced in by the whole group
-        if group is plain:
-            if name in seen_plain:
-                continue
-            seen_plain.add(name)
-        else:
-            seen_whole.add(name)
-        group.append(name)
+        add_archive(token)
     elif token == '-pthread' or token.startswith('-l') and not token.startswith('-labi') or token == '-lm':
         system.add(token)
     else:
         # Bare *.lib names are Windows system libraries (ws2_32.lib, dbghelp.lib).
         if token.endswith('.lib') and not is_our_archive(token):
             system.add(token)
+
+if not whole:
+    moved = [name for name in FALLBACK_WHOLE if name in seen_plain]
+    for name in moved:
+        plain.remove(name)
+        seen_plain.discard(name)
+        seen_whole.add(name)
+    whole.extend(moved)
+    print('package_node: the link line carries no whole-archive group (the macOS and '
+          'Windows linkers are told per archive), so these archives were marked '
+          'force-load from the fallback list: ' + ', '.join(moved))
 
 # Order within each group is kept; system flags are order-insensitive.
 open(whole_path, 'w').write(''.join(name + '\n' for name in whole))
