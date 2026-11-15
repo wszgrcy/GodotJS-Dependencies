@@ -8,12 +8,12 @@ name: node (all platforms)
 # is why they are separate files.
 #
 # Android is in the matrix and cross-compiled with the NDK. Upstream says Android
-# is not a supported platform, and Node 26 even removed the android_configure
-# helper, so the cross toolchain is handed to configure through gyp's environment
-# variables - see node.android_*.configure.txt and prepare_node_build.sh. The
-# bundle check for those targets is compile-and-link with the NDK compiler, not a
-# run (there is no device), which still catches a missing archive, a wrong
-# --whole-archive group, or an ABI mismatch.
+# is not a supported platform and has no CI for it, so the cross toolchain is handed
+# to configure through gyp's environment variables - see node.android_*.configure.txt
+# and prepare_node_build.sh (Node's own ./android-configure sets the same things and
+# then calls ./configure). The bundle check for those targets is compile-and-link with
+# the NDK compiler, not a run (there is no device), which still catches a missing
+# archive, a wrong --whole-archive group, or an ABI mismatch.
 
 on:
   workflow_dispatch:
@@ -38,6 +38,9 @@ on:
         type: string
         default: ''
 
+permissions:
+  contents: read
+
 jobs:
   # The matrix is built here rather than written out on the job, because the
   # `only` filter has to remove whole matrix entries and a job-level `if` cannot
@@ -47,6 +50,7 @@ jobs:
   # release assets are assembled.
   pick:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       entries: ${{ steps.pick.outputs.entries }}
     steps:
@@ -64,8 +68,19 @@ jobs:
             # host-arch mksnapshot, which a cross build cannot do without qemu.
             {"platform": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm"},
             {"platform": "macos", "arch": "arm64", "runner": "macos-latest"},
+            # macOS x86_64 is cross-built on the arm64 runner, which splits Node's
+            # toolset and therefore needs the fix prepare_node_build.sh carries
+            # (docs/node-26.md section 9.4). Native Intel images exist but are not
+            # usable by default: every hosted Intel macOS label is a *larger* runner
+            # (macos-15-intel / macos-15-large, macos-26-intel / macos-26-large), and
+            # GitHub offers larger runners only on the Team and Enterprise Cloud
+            # plans, so on a Free or Pro account the job would queue and never start.
+            # Switch here if this repository ever gets such a plan.
             {"platform": "macos", "arch": "x86_64", "runner": "macos-latest"},
             {"platform": "windows", "arch": "x86_64", "runner": "windows-2022"},
+            # Cross build: windows-2022 is x64, so arm64 Windows splits the toolset
+            # and depends on the fix prepare_node_build.sh carries (section 9.4).
+            # windows-11-arm is the native alternative once this target is next to it.
             {"platform": "windows", "arch": "arm64", "runner": "windows-2022"},
             # Cross builds: the host machine is the same Linux x86_64 runner for
             # all three, the target differs. Host tools (mksnapshot, the JS snapshot
@@ -74,8 +89,10 @@ jobs:
             {"platform": "android", "arch": "arm64", "runner": "ubuntu-24.04"},
             {"platform": "android", "arch": "arm32", "runner": "ubuntu-24.04"},
             {"platform": "android", "arch": "x86_64", "runner": "ubuntu-24.04"},
-            # iOS: cross from a macOS runner with wrapper compilers that bake in the
-            # iPhoneOS SDK (gyp has no ios flavour). See node.ios_arm64.configure.txt.
+            # iOS: built from a macOS runner with wrapper compilers that bake in the
+            # iPhoneOS SDK (gyp has no ios flavour). Same CPU as the runner, so the
+            # args file passes --cross-compiling to get the host toolset it needs to
+            # run mksnapshot. See node.ios_arm64.configure.txt.
             {"platform": "ios", "arch": "arm64", "runner": "macos-latest"},
           ]
 
@@ -97,6 +114,11 @@ jobs:
         entry: ${{ fromJson(needs.pick.outputs.entries) }}
     name: node ${{ matrix.entry.platform }} ${{ matrix.entry.arch }}
     runs-on: ${{ matrix.entry.runner }}
+    # A full Node build takes about 26 minutes on a 16-core machine (measured for
+    # this bundle); a 4-core runner needs several times that. This is a hang guard,
+    # not a budget: the GitHub default of 360 minutes is too long to wait on a build
+    # that stopped making progress.
+    timeout-minutes: 240
     defaults:
       run:
         # Plain `bash`. The runner looks the interpreter up on PATH, so on macOS the
@@ -123,6 +145,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Developer environment for Visual Studio
+        if: ${{ matrix.entry.platform == 'windows' }}
+        # The same procedure Node's own vcbuild.bat runs - find Visual Studio with
+        # vswhere, call vcvarsall.bat, keep the result - packaged as a step (the
+        # vswhere wrapper Node ships, tools/msvs/vswhere_usability_wrapper.cmd, is by
+        # the same author as this action). It exports the developer environment -
+        # PATH, INCLUDE, LIB, VSINSTALLDIR, VisualStudioVersion, WindowsSdkDir - to
+        # every later step, which a bash step cannot do by itself.
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          # arm64 Node is cross-built from an x64 host, which is what vcvarsall's
+          # amd64_arm64 is for.
+          arch: ${{ matrix.entry.arch == 'arm64' && 'amd64_arm64' || 'amd64' }}
 
       - name: Toolchain
         # Runs on the image's bash; this step installs the newer bash the rest of the
@@ -226,57 +262,31 @@ jobs:
               # build/toolchain/win/setup_toolchain.py set GYP_MSVS_OVERRIDE_PATH
               # themselves, because a VS 2017-or-newer install location is officially
               # meant to be found through COM/vswhere rather than the registry.
-              vswhere_win="$(cmd.exe /c 'echo %ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe' | tr -d '\r' | tail -1)"
-              vswhere="$(cygpath -u "$vswhere_win" 2>/dev/null || echo "$vswhere_win")"
-              vs_path=""
-              vs_name=""
-              if [ -f "$vswhere" ]; then
-                vs_query=("$vswhere" -latest -products '*'
-                  -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64)
-                vs_path="$("${vs_query[@]}" -property installationPath | tr -d '\r' | head -1)"
-                case "$("${vs_query[@]}" -property installationVersion \
-                         | tr -d '\r' | head -1 | cut -d. -f1)" in
-                  15) vs_name=2017 ;;
-                  16) vs_name=2019 ;;
-                  17) vs_name=2022 ;;
-                  18) vs_name=2026 ;;
-                esac
-              else
-                echo "no vswhere at $vswhere_win, falling back to install paths"
+              # The developer environment step located Visual Studio with vswhere and
+              # ran vcvarsall.bat already, so the answer is in the job's environment:
+              # VSINSTALLDIR is the install root, VisualStudioVersion the major. That
+              # pair is handed to gyp because gyp cannot look it up itself - the copy
+              # vendored in Node (tools/gyp/pylib/gyp/MSVSVersion.py) has no vswhere
+              # support, only the registry probe and this override - and vcbuild.bat
+              # sets the same GYP_MSVS_VERSION after its own vcvarsall call.
+              if [ -z "${VSINSTALLDIR:-}" ]; then
+                echo "The developer environment step exported no VSINSTALLDIR, so"
+                echo "vswhere found no Visual Studio with a C++ toolchain on this image."
+                exit 1
               fi
-              if [ -z "$vs_path" ]; then
-                # No vswhere, or vswhere had no answer. Walk the same directories
-                # Chromium's vs_toolchain.py walks: a vs<year>_install hint, then one
-                # directory per edition.
-                pf="$(cmd.exe /c 'echo %ProgramFiles%' | tr -d '\r' | tail -1)"
-                pf86="$(cmd.exe /c 'echo %ProgramFiles(x86)%' | tr -d '\r' | tail -1)"
-                for entry in "2026|$pf/Microsoft Visual Studio/18" \
-                             "2022|$pf/Microsoft Visual Studio/2022" \
-                             "2019|$pf86/Microsoft Visual Studio/2019" \
-                             "2017|$pf86/Microsoft Visual Studio/2017"; do
-                  vs_name="${entry%%|*}"
-                  root="${entry#*|}"
-                  hint="$(printenv "vs${vs_name}_install" 2>/dev/null || true)"
-                  for candidate in "$hint" "$root/Enterprise" "$root/Professional" \
-                                   "$root/Community" "$root/Preview" \
-                                   "$root/Insiders" "$root/BuildTools"; do
-                    [ -n "$candidate" ] || continue
-                    probe="$(cygpath -u "$candidate" 2>/dev/null || echo "$candidate")"
-                    if [ -f "$probe/VC/Auxiliary/Build/vcvarsall.bat" ]; then
-                      vs_path="$candidate"
-                      break 2
-                    fi
-                  done
-                done
-              fi
-              case "$vs_path" in
+              vs_path="${VSINSTALLDIR%\\}"
+              case "${VisualStudioVersion:-}" in
+                15.*) vs_name=2017 ;;
+                16.*) vs_name=2019 ;;
+                17.*) vs_name=2022 ;;
+                18.*) vs_name=2026 ;;
                 "")
-                  echo "Neither vswhere ($vswhere_win) nor the usual install"
-                  echo "directories turned up a Visual Studio with a C++ toolchain."
-                  if [ -f "$vswhere" ]; then
-                    echo "What vswhere does see:"
-                    "$vswhere" -products '*' -property displayName
-                  fi
+                  echo "VisualStudioVersion is not set (VSINSTALLDIR=$VSINSTALLDIR)."
+                  exit 1
+                  ;;
+                *)
+                  echo "no GYP_MSVS_VERSION mapping for VisualStudioVersion"
+                  echo "${VisualStudioVersion}; add it to the case above."
                   exit 1
                   ;;
               esac
@@ -397,7 +407,37 @@ jobs:
       - name: Fetch Node source
         run: |
           set -euo pipefail
-          curl -fL -o node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz"
+          # --retry because nodejs.org sits behind a CDN that occasionally answers a
+          # single request with a 503 or a truncated body; one of those would
+          # otherwise throw away a whole build.
+          curl -fL --retry 5 --retry-all-errors --connect-timeout 20 \
+            -o node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz"
+
+          # The published SHA-256, from SHASUMS256.txt next to the tarball. Without
+          # this a damaged archive fails an hour later as a compile error in a file
+          # that has nothing to do with the download. The detached .asc signature is
+          # not checked: that needs Node's release signing keys, and the runner does
+          # not have them.
+          curl -fL --retry 5 --retry-all-errors --connect-timeout 20 \
+            -o SHASUMS256.txt "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"
+          expected="$(awk -v f="node-v${NODE_VERSION}.tar.xz" '$2==f{print $1; exit}' SHASUMS256.txt)"
+          if [ -z "$expected" ]; then
+            echo "SHASUMS256.txt has no line for node-v${NODE_VERSION}.tar.xz" >&2
+            exit 1
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum node.tar.xz | awk '{print $1}')"
+          else
+            actual="$(shasum -a 256 node.tar.xz | awk '{print $1}')"
+          fi
+          if [ "$actual" != "$expected" ]; then
+            echo "node.tar.xz sha256 does not match the published value" >&2
+            echo "  published $expected" >&2
+            echo "  downloaded $actual" >&2
+            exit 1
+          fi
+          echo "node-v${NODE_VERSION}.tar.xz sha256 verified ($actual)"
+
           tar -xf node.tar.xz
           mv "node-v${NODE_VERSION}" node
           df -h . || true
@@ -503,3 +543,6 @@ jobs:
         with:
           name: prebuilt_node_${{ matrix.entry.platform }}_${{ matrix.entry.arch }}
           path: staging/
+          # Without this an empty staging/ uploads successfully, and the failure only
+          # shows up where the bundle is consumed.
+          if-no-files-found: error

@@ -398,6 +398,15 @@ jobs:
             echo "Created Node bundle: staging/$asset"
           done
 
+          # nodejs.org publishes SHASUMS256.txt next to its tarballs for exactly the
+          # reason that applies here: these archives get downloaded over a network by
+          # whoever builds the engine. The release page carries the same list.
+          if compgen -G "staging/*.zip" > /dev/null; then
+            ( cd staging && sha256sum *.zip > SHA256SUMS.txt )
+            echo "staging/SHA256SUMS.txt:"
+            cat staging/SHA256SUMS.txt
+          fi
+
           # The release page gets the list that was actually produced, which is the
           # quickest way to see which runtime and which platforms made it.
           assets=""
@@ -411,8 +420,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          files=(staging/*.zip)
+          if [ -f staging/SHA256SUMS.txt ]; then
+            files+=(staging/SHA256SUMS.txt)
+          fi
           gh release create "${{ github.event.inputs.bundle_tag }}" \
-            staging/*.zip \
+            "${files[@]}" \
             --title "${{ github.event.inputs.bundle_tag }}" \
             --notes "Bundles: ${{ steps.pack.outputs.assets }}" \
             --repo ${{ github.repository }} \

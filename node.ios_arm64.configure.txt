@@ -27,9 +27,15 @@
 # build scripts live in a private Node fork (moluopro/nodejs), so the arguments
 # above are ours, not copied.
 
+# --cross-compiling has to be explicit here. The iOS job runs on an arm64 macOS
+# runner and the target is arm64, and ./configure decides the host/target split from
+# the CPU alone (cross_compiling falls back to target_arch != host_arch). Without the
+# flag the host tools would be built for iOS and could not run on the runner.
+
 --ninja
 --dest-os=ios
 --dest-cpu=arm64
+--cross-compiling
 --with-intl=full-icu
 --without-node-options
 --without-npm

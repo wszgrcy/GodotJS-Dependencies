@@ -7,14 +7,26 @@
 #   $NDK/toolchains/llvm/prebuilt/<host>/bin/x86_64-linux-android<api>-clang[-++]
 # prepare_node_build.sh refuses to continue when they are missing.
 
-# Node 26 removed tools/android_configure.py, so ./android-configure imports a
-# module that is not there; set the variables above and call ./configure directly.
+# Node's own helper is ./android-configure <NDK path> <API level> <arch>, at the
+# source root in 26.13.1 (android-configure plus android_configure.py). It exports
+# CC/CXX to the NDK wrappers, puts the NDK bin on PATH, sets GYP_DEFINES, and then
+# runs ./configure with --dest-os=android --openssl-no-asm --cross-compiling. Passing
+# the variables yourself and calling ./configure does the same thing, which is what
+# CI does here (gyp reads CC_target first, then CC).
 
-# This is the target an Android emulator on a desktop CI machine runs, so it is the
-# cheapest one to actually execute a bundle check on (adb, given a device).
+# --cross-compiling is required for this target and not just for form: ./configure
+# decides whether to build a separate host toolset by comparing CPUs
+# (cross_compiling falls back to target_arch != host_arch), and an x86_64 Android
+# build on an x86_64 runner matches. Without the flag, mksnapshot and the bytecode
+# builder would be compiled as Bionic binaries that cannot run on the runner.
+# --openssl-no-asm matches ./android-configure.
 --ninja
 --dest-os=android
 --dest-cpu=x64
+--cross-compiling
+--openssl-no-asm
+# This is the target an Android emulator on a desktop CI machine runs, so it is the
+# cheapest one to actually execute a bundle check on (adb, given a device).
 --with-intl=full-icu
 --without-node-options
 --without-npm

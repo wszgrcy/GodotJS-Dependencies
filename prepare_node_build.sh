@@ -31,6 +31,13 @@
 #      not want to export its whole symbol table for that. Set NODE_KEEP_RDYNAMIC=1
 #      if loading prebuilt .node addons matters more than symbol hygiene.
 #
+#   4. Applies nodejs/node#66804 ("build: use a single producer for shared generated
+#      files") unless the source already carries it. Without it a cross build cannot
+#      produce a ninja graph at all - the host toolset and the target toolset both
+#      claim the same generated file, and ninja refuses before compiling anything.
+#      Merged upstream on 2026-11-05 but not in any release through 26.13.1, so the
+#      patch is carried under patches/. Native builds are unaffected either way.
+#
 # Environment:
 #   NODE_KEEP_NO_RTTI=1    leave -fno-rtti alone
 #   NODE_KEEP_RDYNAMIC=1   leave -rdynamic alone
@@ -145,12 +152,18 @@ require_cross_toolchain() {
   # $1 = label, $2 = hint shown on failure, $3 = which variables must be set.
   # READELF_target is only needed where gyp's readelf rules apply; the Apple SDK has
   # no readelf at all, so an iOS cross build legitimately leaves it unset.
+  # Each X_target may also be given as plain X: gyp reads them in that order, and
+  # Node's ./android-configure sets the plain form.
   local label="$1" hint="$2" vars="$3"
-  local missing=() cross_var cross_value
+  local missing=() cross_var cross_value base_var
   for cross_var in $vars; do
+    base_var="${cross_var%_target}"
     cross_value="${!cross_var:-}"
     if [ -z "$cross_value" ]; then
-      missing+=("$cross_var")
+      cross_value="${!base_var:-}"
+    fi
+    if [ -z "$cross_value" ]; then
+      missing+=("$cross_var (or $base_var)")
     elif ! command -v "$cross_value" >/dev/null 2>&1 && [ ! -x "$cross_value" ]; then
       missing+=("$cross_var (set but not runnable: $cross_value)")
     fi
@@ -160,13 +173,13 @@ require_cross_toolchain() {
     echo "  $hint" >&2
     exit 1
   fi
-  echo "prepare_node_build: $label/$dest_cpu with $CXX_target"
+  echo "prepare_node_build: $label/$dest_cpu with ${CXX_target:-${CXX:-the default compiler}}"
 }
 
 case "${dest_os:-linux}" in
   android)
     require_cross_toolchain android \
-"Point them at the Android NDK wrapper compilers in \$NDK/toolchains/llvm/prebuilt/<host>/bin/, named after the target and API level, for example aarch64-linux-android28-clang and -clang++. Node 26 has no tools/android_configure.py, so ./android-configure cannot be used instead; these variables are the only way in." \
+"Point them at the Android NDK wrapper compilers in \$NDK/toolchains/llvm/prebuilt/<host>/bin/, named after the target and API level, for example aarch64-linux-android28-clang and -clang++. Node's own ./android-configure <NDK> <API> <arch> sets the same compilers (as plain CC/CXX) and then runs ./configure with --dest-os=android --openssl-no-asm --cross-compiling; either route works, this script only needs the variables." \
 "CC_target CXX_target AR_target NM_target READELF_target"
 
     # OpenSSL's generated configurations in the source tree cover linux, macOS,
@@ -204,6 +217,53 @@ case "${dest_os:-linux}" in
     exit 1
     ;;
 esac
+
+# --- one build fix no released Node has yet ------------------------------------
+# nodejs/node#66804: in a cross build the host toolset and the target toolset each
+# register the shared generated files, so ninja sees two producers for one output
+# and refuses before compiling anything:
+#
+#   ninja: error: obj.host/tools/v8_gypfiles/v8_inspector_headers.ninja:26:
+#   multiple rules generate gen/inspector-generated-output-root/src/js_protocol.stamp
+#
+# Verified on 26.13.1 with a same-OS cross configure (linux x86_64 host,
+# --dest-cpu=arm64): without the patch ninja refuses, with it the graph parses
+# (6523 targets), and a native configure still parses afterwards.
+CROSS_PATCH="$SCRIPT_DIR/patches/node-66804-single-producer.patch"
+if [ -f "$CROSS_PATCH" ]; then
+  if ! command -v git >/dev/null 2>&1; then
+    echo "prepare_node_build: git is needed to apply $CROSS_PATCH" >&2
+    exit 1
+  fi
+  host_cpu="$(uname -m)"
+  case "$host_cpu" in x86_64|amd64) host_cpu=x64 ;; aarch64|arm64) host_cpu=arm64 ;; esac
+  host_os="$(uname -s)"
+  case "$host_os" in
+    Linux) host_os=linux ;;
+    Darwin) host_os=mac ;;
+    MINGW*|MSYS*|CYGWIN*) host_os=win ;;
+  esac
+  cross_build=0
+  if { [ -n "$dest_cpu" ] && [ "$dest_cpu" != "$host_cpu" ]; } ||
+     { [ -n "$dest_os" ] && [ "$dest_os" != "$host_os" ]; }; then
+    cross_build=1
+  fi
+  if ( cd "$NODE_SRC" && git apply --check -p1 "$CROSS_PATCH" ) >/dev/null 2>&1; then
+    ( cd "$NODE_SRC" && git apply -p1 "$CROSS_PATCH" )
+    echo "prepare_node_build: applied nodejs/node#66804 (single producer for shared generated files)"
+  elif ( cd "$NODE_SRC" && git apply --reverse --check -p1 "$CROSS_PATCH" ) >/dev/null 2>&1; then
+    echo "prepare_node_build: nodejs/node#66804 is already in this Node source"
+  elif [ "$cross_build" = 1 ]; then
+    echo "prepare_node_build: this is a cross build ($host_os/$host_cpu -> ${dest_os:-same os}/${dest_cpu:-same cpu})" >&2
+    echo "  and $CROSS_PATCH fits neither forward nor in reverse, so ninja would stop" >&2
+    echo "  with 'multiple rules generate ...'. Either this Node version already" >&2
+    echo "  carries nodejs/node#66804 in a changed form, or the patch needs updating." >&2
+    exit 1
+  else
+    echo "prepare_node_build: nodejs/node#66804 fits neither way; a native build does"
+    echo "  not need it, so continuing."
+  fi
+fi
 
 # --- RTTI and -rdynamic in common.gypi -----------------------------------------
 python3 - "$NODE_SRC/common.gypi" "${NODE_KEEP_NO_RTTI:-0}" "${NODE_KEEP_RDYNAMIC:-0}" <<'PY'

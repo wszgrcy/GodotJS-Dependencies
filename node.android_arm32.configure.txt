@@ -7,8 +7,16 @@
 #   $NDK/toolchains/llvm/prebuilt/<host>/bin/armv7a-linux-androideabi<api>-clang[-++]
 # prepare_node_build.sh refuses to continue when they are missing.
 
-# Node 26 removed tools/android_configure.py, so ./android-configure imports a
-# module that is not there; set the variables above and call ./configure directly.
+# Node's own helper is ./android-configure <NDK path> <API level> <arch>, at the
+# source root in 26.13.1 (android-configure plus android_configure.py). It exports
+# CC/CXX to the NDK wrappers, puts the NDK bin on PATH, sets GYP_DEFINES, and then
+# runs ./configure with --dest-os=android --openssl-no-asm --cross-compiling. Passing
+# the variables yourself and calling ./configure does the same thing, which is what
+# CI does here (gyp reads CC_target first, then CC).
+
+# --cross-compiling forces the host/target toolset split; Node infers it from the CPU
+# alone, so an arm target would get it anyway. --openssl-no-asm matches
+# ./android-configure: OpenSSL's asm configs are not generated for android targets.
 
 # When --dest-os=android and --dest-cpu=arm are combined, configure.py forces
 # arm_version 7 and arm_fpu vfpv3 (it does that itself, around the
@@ -21,6 +29,8 @@
 --ninja
 --dest-os=android
 --dest-cpu=arm
+--cross-compiling
+--openssl-no-asm
 --with-intl=full-icu
 --without-node-options
 --without-npm
