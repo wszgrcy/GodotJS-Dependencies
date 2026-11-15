@@ -228,28 +228,95 @@ copy_fat() {
     echo "  Removing *.o from the build directory before this step breaks packaging." >&2
     exit 1
   fi
-  local base="$NODE_OUT"
-  local first
+  # What 'ar t' prints for a thin archive is whatever path was handed to ar when
+  # the member was added: usually relative to the build directory, sometimes
+  # absolute, and relative to the archive for some generators. All three have to
+  # resolve, or an archive silently loses members. One prefix is worked out per
+  # archive (from its first entry) and absolute entries are used as they are.
+  local prefix="" first
   first="$(head -n 1 "$list")"
-  if [ ! -e "$NODE_OUT/$first" ]; then
-    # Some generators write the member paths relative to the archive instead.
-    base="$(dirname "$src")"
-  fi
-  ( cd "$base" && tr '\n' '\0' < "$list" | xargs -0 ar rcs "$dest/$name" )
-  command -v ranlib >/dev/null && ranlib "$dest/$name"
+  case "$first" in
+    /*) prefix="" ;;
+    *)
+      if [ -e "$NODE_OUT/$first" ]; then
+        prefix="$NODE_OUT/"
+      else
+        prefix="$(dirname "$src")/"
+      fi
+      ;;
+  esac
 
-  # ar stores members under their file name, so two object files in different
-  # directories with the same name would silently overwrite each other here.
-  local want got
-  want="$(wc -l < "$list")"
+  # Member names have to be made unique before archiving. ar stores a member under
+  # its file name, not its path, and 'ar r' replaces whatever already sits under
+  # that name, so two objects with the same file name in different directories
+  # overwrite each other. Whether they do depends on the ar in use and on how many
+  # names fit into one xargs batch: binutils 2.42 replaces inside a single run, 2.46
+  # only replaces against members that were already in the archive. V8 does have
+  # such pairs - libv8_base_without_compiler.a holds seven (v8_base_without_compiler.
+  # heap.o and friends, each built from two different directories) - so this must
+  # not be left to whichever binutils a runner happens to ship.
+  #
+  # Each object is copied to a staging directory under a name no other member of
+  # this archive uses: the plain file name first, then name.2.o, name.3.o (the .o
+  # stays last so the archive still reads normally). Nothing outside the archive
+  # cares about member names; symbols are what the linker matches on, and
+  # verify_node_bundle.sh links the whole set to prove that.
+  local stage="$WORK/$name.stage"
+  rm -rf "$stage"; mkdir -p "$stage"
+  local entry path target stem suffix staged=0 renamed=0
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      /*) path="$entry" ;;
+      *) path="$prefix$entry" ;;
+    esac
+    if [ ! -f "$path" ]; then
+      echo "package_node: $name: member '$entry' is not readable at $path" >&2
+      echo "  A thin archive points at object files instead of holding them; every" >&2
+      echo "  one of them has to still exist when this step runs (the build dir was" >&2
+      echo "  $NODE_OUT)." >&2
+      exit 1
+    fi
+    stem="$(basename "$entry")"
+    target="$stem"
+    suffix=2
+    while [ -e "$stage/$target" ]; do
+      if [ "${stem%.o}" != "$stem" ]; then
+        target="${stem%.o}.${suffix}.o"
+      else
+        target="$stem.$suffix"
+      fi
+      suffix=$((suffix + 1))
+    done
+    if [ "$target" != "$stem" ]; then
+      renamed=$((renamed + 1))
+      echo "package_node: $name: two objects are named $stem, keeping the second as $target"
+    fi
+    cp "$path" "$stage/$target"
+    staged=$((staged + 1))
+  done < "$list"
+
+  # All names in the staging directory are unique, so one ar invocation cannot
+  # replace anything. find keeps the command line short if an archive ever grows.
+  ( cd "$stage" && find . -maxdepth 1 -type f -print0 | xargs -0 ar rcs "$dest/$name" )
+  command -v ranlib >/dev/null && ranlib "$dest/$name"
+  rm -rf "$stage"
+
+  local want got dup
+  want="$(grep -c . "$list")"
   got="$(ar t "$dest/$name" | wc -l)"
-  if [ "$want" != "$got" ]; then
-    echo "package_node: $name came out with $got members instead of $want." >&2
-    echo "  Two object files inside it share a file name; they would also collide" >&2
-    echo "  when linked, so this has to be resolved by hand." >&2
+  dup="$(ar t "$dest/$name" | sort | uniq -d | wc -l)"
+  if [ "$staged" != "$want" ]; then
+    echo "package_node: $name: the thin archive lists $want members but only $staged could be read." >&2
     exit 1
   fi
-  echo "package_node: $(basename "$src") -> $name ($got object files)"
+  if [ "$want" != "$got" ] || [ "$dup" != "0" ]; then
+    echo "package_node: $name came out wrong: $got members, expected $want, $dup name(s) used twice." >&2
+    echo "  Every member of the thin archive has to end up in the bundle exactly" >&2
+    echo "  once and under its own name. The staging directory was $stage (removed)." >&2
+    exit 1
+  fi
+  echo "package_node: $(basename "$src") -> $name ($got object files${renamed:+, $renamed kept under a second name})"
 }
 
 while IFS= read -r name; do
