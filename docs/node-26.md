@@ -88,6 +88,7 @@ build.
 | `tools/node_link_probe.cc` | the program that proves a bundle is usable (see section 7) |
 | `tools/node_v8_version.sh` | prints the V8 version a Node version embeds, so the standalone V8 bundle can be built at the same one |
 | `tools/local_node_job_check.sh` | replays one desktop job of `build_node.yml` on your own machine (unpack, prepare, configure, ninja, package, verify), and first parse-checks every platform's `configure.txt` against `node`'s own `configure --help` |
+| `tools/check_workflow_contexts.py` | checks `.github/workflows/` for things GitHub only reports while parsing the file: a `shell:` value that uses a context it does not allow, and steps whose script is not valid for the shell that runs them |
 | `.github/workflows/build_node.yml` | one matrix job per platform/arch, called by `build_all.yml` |
 
 Before changing any of these scripts, run the local replay instead of pushing and
@@ -562,14 +563,6 @@ executes sticks to bash 3.2: an array is filled with
 `build_node.yml` reads a `configure.txt` and how `tools/local_node_job_check.sh`
 reads one, so the same script also runs on a developer's Mac.
 
-Two alternatives are in wider use, and both are reasonable if a script ever needs a
-bash 4 feature: install a newer bash and name it
-(`brew install bash`, `shell: /opt/homebrew/bin/bash`), or keep the shell thin and
-put the logic in Python. Godot's own macOS CI takes the second route - its macOS
-steps are `shell: sh` and the real work lives in Python scripts under
-`misc/scripts/`. `gode`, which is the reference for the Node bundle layout, has no
-macOS job at all, so it is no guide here.
-
 Nothing here has been deprecated away, which is worth stating because "2009" invites
 the opposite assumption. Checked against first-hand sources on 2026-11-15:
 
@@ -578,22 +571,54 @@ the opposite assumption. Checked against first-hand sources on 2026-11-15:
   `images/macos/macos-26-arm64-Readme.md` of `actions/runner-images`; the same line
   appears in the macos-15 image, so it has not moved for years;
 - the Actions runner runs a `shell: bash` step as
-  `/bin/bash --noprofile --norc -e -o pipefail {0}` - visible in the job log;
+  `<bash found on PATH> --noprofile --norc -e -o pipefail {0}` - the argument list is
+  in `_defaultArguments` of `ScriptHandlerHelpers.cs`, the lookup is
+  `WhichUtil.Which("bash")` in `ScriptHandler.cs`, both in `actions/runner`; the docs
+  say the same thing in prose: "if bash is not found in the path, this is treated as
+  `sh`";
+- Homebrew's bash is `5.3.20` and `keg_only: false`
+  (`https://formulae.brew.sh/api/formula/bash.json`), so installing it does put a
+  `bash` on the Homebrew bin path;
 - Node's own CI (`.github/workflows/build-shared.yml` in nodejs/node) uses
   `shell: bash` and keeps the step to `python3 ./configure` plus `make`, with no bash 4
-  constructs;
-- Homebrew's CI (`.github/workflows/tests.yml`) runs on `macos-26` with
-  `shell: bash -xeuo pipefail {0}` and never installs another bash.
+  constructs; Homebrew's own CI names its own flags instead
+  (`shell: bash -xeuo pipefail {0}` on `macos-26`).
 
-So the mainstream answer is "write for the bash that is there", and the two escape
-hatches above are for scripts that genuinely want bash 4 features.
+So the version really is 3.2, and it is not going away; the way to get a modern bash in
+a workflow is to install one and let `PATH` find it:
 
-What this repository does: the `node` workflow installs a modern bash on macOS
-(`brew install bash`, and a failure there is not fatal), and every step after the
-toolchain step runs through `NODE_CI_BASH` - the Homebrew bash when it is present,
-the runner default otherwise - with the runner's own flags spelled out, because a
-custom shell path gets no default flags from the runner. The scripts stay 3.2-safe,
-so the fallback is a working fallback rather than a second way to fail.
+```yaml
+- name: Toolchain            # macOS case
+  run: |
+    brew install bash
+    echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
+```
+
+`GITHUB_PATH` is prepended to `PATH` for the steps that follow, and since the runner
+looks `bash` up on `PATH`, every later step - and every `bash Scripts/x.sh` call inside
+one - runs the new one. `shell:` itself stays the plain literal `bash`, so nothing is
+lost from the runner's default flags. `$(brew --prefix bash)/bin` is used rather than a
+hardcoded `/opt/homebrew/...` because it is also correct on Intel images (`/usr/local`),
+and it works whether or not the formula is linked.
+
+If a step does name its own interpreter instead, two rules bite:
+
+- GitHub's documented form is a template string `command [options] {0}`. A custom path
+  gets no default arguments from the runner, so `--noprofile --norc -e -o pipefail {0}`
+  has to be written out; leaving them off silently drops `set -e` and `pipefail`.
+- An expression in `shell:` (in a step or in `defaults.run.shell`) may not use the
+  `env` context: `${{ env.X }}` fails while GitHub parses the file
+  ("Unrecognized named-value: 'env'") and, for a workflow reached through
+  `workflow_call`, takes the caller down too. Only `github`, `needs`, `strategy`,
+  `matrix`, `vars`, `secrets` and `inputs` are available there.
+  `tools/check_workflow_contexts.py` enforces that rule across `.github/workflows/`,
+  because the parser error otherwise only surfaces on GitHub.
+
+The step that installs the newer bash still runs on 3.2, and every script here stays
+3.2-safe regardless, so a developer on a Mac can run them without installing anything.
+`gode`, the reference for the bundle layout, has no macOS job at all, and Godot's own
+macOS CI takes a different route (`shell: sh` with the work in Python scripts under
+`misc/scripts/`), so neither is a guide for this.
 
 ### 9.2 `--whole-archive` is GNU ld syntax only
 

@@ -99,6 +99,9 @@ jobs:
     runs-on: ${{ matrix.entry.runner }}
     defaults:
       run:
+        # Plain `bash`. The runner looks the interpreter up on PATH, so on macOS the
+        # Homebrew bash installed by the Toolchain step is what runs these steps.
+        # A literal also sidesteps which contexts an expression here may use.
         shell: bash
     env:
       NODE_VERSION: ${{ inputs.node_version }}
@@ -122,6 +125,9 @@ jobs:
           python-version: '3.12'
 
       - name: Toolchain
+        # Runs on the image's bash; this step installs the newer bash the rest of the
+        # job then uses, so it has to stay compatible with 3.2.
+        shell: bash
         run: |
           set -euo pipefail
           case "$NODE_PLATFORM" in
@@ -159,11 +165,25 @@ jobs:
               # so a failure says whether the image is behind.
               xcodebuild -version
               ninja --version
-              # The image's only bash is 3.2, so install a modern one and let the
-              # later steps run with it (docs/node-26.md section 9.1). Not fatal on
-              # purpose: /bin/bash stays as the fallback, and every script here is
-              # written so it also runs on 3.2.
-              brew install bash || echo "brew install bash failed; continuing with /bin/bash 3.2"
+              # The image guarantees only /bin/bash 3.2. Homebrew's bash (5.x, and not
+              # a keg-only formula) is what these scripts are written for.
+              brew install bash
+              # The runner starts a step with whatever `bash` resolves to on PATH
+              # (actions/runner ScriptHandler.cs: WhichUtil.Which("bash")), so putting
+              # this directory in front is enough: no per-step shell string, and inner
+              # `bash Scripts/x.sh` calls get the same interpreter. Prepended explicitly
+              # rather than relying on the image's PATH order. `brew --prefix bash` is
+              # correct on both Apple Silicon and Intel images.
+              BASH_DIR="$(brew --prefix bash)/bin"
+              if [ ! -x "$BASH_DIR/bash" ]; then
+                echo "brew --prefix bash points at $BASH_DIR, which has no bash in it."
+                echo "brew --prefix is $(brew --prefix)."
+                exit 1
+              fi
+              echo "$BASH_DIR" >> "$GITHUB_PATH"
+              export PATH="$BASH_DIR:$PATH"
+              "$BASH_DIR/bash" --version | head -1
+              echo "later steps resolve bash to: $(command -v bash)"
               ;;
             windows)
               # From Node 24 on, Windows is built with clang-cl, which is an
@@ -374,22 +394,7 @@ jobs:
               ;;
           esac
 
-          # Every later step runs through this shell. macOS gets the Homebrew bash
-          # installed above when it is there; everywhere else (and macOS if that
-          # install failed) keeps the runner default, which is the only bash the image
-          # guarantees. A custom shell path gets no default flags from the runner, so
-          # the ones it normally passes for `shell: bash` are spelled out - otherwise
-          # the two choices would differ in set -e and pipefail.
-          if [ "$NODE_PLATFORM" = macos ] && [ -x /opt/homebrew/bin/bash ]; then
-            /opt/homebrew/bin/bash --version | head -1
-            echo "NODE_CI_BASH=/opt/homebrew/bin/bash" >> "$GITHUB_ENV"
-          else
-            bash --version | head -1
-            echo "NODE_CI_BASH=bash" >> "$GITHUB_ENV"
-          fi
-
       - name: Fetch Node source
-        shell: ${{ env.NODE_CI_BASH }} --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
           curl -fL -o node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz"
@@ -398,7 +403,6 @@ jobs:
           df -h . || true
 
       - name: Build Node
-        shell: ${{ env.NODE_CI_BASH }} --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
           cd node
@@ -454,7 +458,6 @@ jobs:
           fi
 
       - name: Package
-        shell: ${{ env.NODE_CI_BASH }} --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
           # A failure here is usually "No space left on device" while copying a
@@ -472,11 +475,9 @@ jobs:
         # The probe compiles and runs on POSIX toolchains; on Windows the package
         # step is still checked, the link test is left to a local run.
         if: ${{ matrix.entry.platform != 'windows' }}
-        shell: ${{ env.NODE_CI_BASH }} --noprofile --norc -e -o pipefail {0}
         run: bash Scripts/verify_node_bundle.sh staging
 
       - name: What came out
-        shell: ${{ env.NODE_CI_BASH }} --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
           du -sh staging/node/* || true
