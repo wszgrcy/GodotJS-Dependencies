@@ -427,11 +427,14 @@ jobs:
 
           ninja -C out/Release node
 
-          # Object files exist so a relink can reuse them. The package step copies
-          # the archives and never looks at them again, and on the hosted runners
-          # they are several of the gigabytes that fill the disk before Package.
-          find out/Release \( -name '*.o' -o -name '*.obj' \) -delete
-          echo "out/Release after dropping objects:"; du -sh out/Release || true
+          # No object cleanup here, on purpose. On Linux Node's .a files are thin
+          # archives: they store the paths of their object files rather than their
+          # contents, so the package step has to read those .o files to build the fat
+          # archives that go into the bundle. Deleting them before Package makes ar
+          # fail with the archive's own name:
+          #   ar: .../out/Release/obj/libnode_base.a: No such file or directory
+          # The cleanup is a separate step, run after the bundle is verified.
+          du -sh out/Release || true
           df -h . || true
 
           # Smoke test the binary the archives came from - but only when it was
@@ -476,6 +479,18 @@ jobs:
         # step is still checked, the link test is left to a local run.
         if: ${{ matrix.entry.platform != 'windows' }}
         run: bash Scripts/verify_node_bundle.sh staging
+
+      - name: Free the object files
+        # Runs after the bundle is packaged and checked: the Linux archives are thin,
+        # so packaging reads the object files this step removes. This only exists to
+        # keep the disk free for the artifact upload.
+        run: |
+          set -euo pipefail
+          if [ -d node/out/Release ]; then
+            find node/out/Release \( -name '*.o' -o -name '*.obj' \) -delete
+          fi
+          du -sh node/out/Release || true
+          df -h . || true
 
       - name: What came out
         run: |

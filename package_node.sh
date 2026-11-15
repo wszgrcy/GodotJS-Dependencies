@@ -180,6 +180,8 @@ open(plain_path, 'w').write(''.join(name + '\n' for name in plain))
 open(system_path, 'w').write(''.join(flag + '\n' for flag in sorted(system)))
 print(f'package_node: {len(whole)} archive(s) whole-archive, {len(plain)} plain, '
       f'{len(system)} system flags')
+print('package_node: whole: ' + ', '.join(whole))
+print('package_node: plain: ' + ', '.join(plain))
 if not whole:
     raise SystemExit('package_node: no archives in the link command - is this the node target?')
 PY
@@ -216,7 +218,16 @@ copy_fat() {
   # object file relative to the build directory, so the members can be archived
   # straight from there.
   local list="$WORK/$name.members"
-  ar t "$src" > "$list"
+  if ! ar t "$src" > "$list"; then
+    # ar names the archive here, not the missing member, because listing a thin
+    # archive means opening every object file it points at. The usual reason for
+    # that to fail is that the object files were deleted before packaging.
+    echo "package_node: cannot list $src." >&2
+    echo "  It is a thin archive: it holds the paths of its object files instead of" >&2
+    echo "  their contents, so every one of them has to still exist under $NODE_OUT." >&2
+    echo "  Removing *.o from the build directory before this step breaks packaging." >&2
+    exit 1
+  fi
   local base="$NODE_OUT"
   local first
   first="$(head -n 1 "$list")"

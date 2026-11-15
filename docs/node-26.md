@@ -686,3 +686,31 @@ the bundle is then slower at crypto than Node's own Windows build, and the log o
 says "WARNING". The Windows job installs nasm and stops if it still cannot be run.
 Writing `--openssl-no-asm` into the args file is the alternative when that install is
 not wanted; what must not happen is the build choosing it because a tool was missing.
+
+### 9.5 On Linux, Node's `.a` files are thin archives
+
+GNU `ar` on Linux writes *thin* archives for Node: the `.a` file holds the paths of its
+object files, not their contents. The object files are therefore part of the input to
+packaging, and this is what the failure looks like when they are gone:
+
+```text
+package_node: 6 archive(s) whole-archive, 31 plain, 3 system flags
+ar: .../node/out/Release/obj/libnode_base.a: No such file or directory
+```
+
+The message names the archive, which is misleading: the archive exists, its members do
+not. Listing a thin archive means opening every object file it points at, so `ar t`
+fails and reports the archive's own name. Reproduced locally (GNU binutils 2.46) with
+any archive whose members were deleted.
+
+Two consequences, both implemented:
+
+- `package_node.sh` un-thins each archive by archiving the members itself, and says so
+  plainly when the members are missing, instead of leaving ar's message on its own.
+- The CI job must not delete `*.o` before Package. "Free the object files" is a step of
+  its own, after the bundle has been verified; it exists to keep disk free for the
+  artifact upload, and on a Linux build it is the last thing that may touch them.
+
+macOS (Apple `libtool`) and Windows (`lib.exe`) produce ordinary archives, so this is a
+Linux-only constraint. `head -c 8 <archive>` shows which kind you have: `!<arch>` is a
+normal archive, `!<thin>` is a thin one.
