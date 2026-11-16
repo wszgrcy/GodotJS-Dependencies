@@ -1,0 +1,79 @@
+Teach the vendored gyp to compile Windows with clang-cl, and to know arm64
+
+Node 24 and newer require clang-cl on Windows (BUILDING.md: "As of Node.js 24.0.0,
+ClangCL is required to compile on Windows"), but `./configure --clang-cl=<version>`
+only records the toolchain in the generated config - it does not change which
+compiler ninja runs. gyp's ninja generator looks cl.exe up through the Visual Studio
+environment and keeps using it, while the flags Node asks for are chosen by the
+`clang=1` variable that same option sets. The result is clang-style flags compiled by
+MSVC, and no C++ standard at all, because Node expresses the standard in
+`msvs_settings`' LanguageStandard, which gyp marks MSBuild-only and the ninja
+generator drops.
+
+gyp's only knob for another compiler on Windows is a `make_global_settings` CC entry
+whose path ends in "clang-cl", and it cannot be used from Node: gyp requires that
+entry to be identical in the top level of every .gyp file of the build
+(generator/ninja.py asserts "make_global_settings needs to be the same for all
+targets"), Node's build files share no single top-level include, and node.gyp alone
+cannot carry it. The path is therefore taken in here instead, from
+`-G clang_cl=<path>` or the GODOTJS_NODE_CLANG_CL environment variable, and handed to
+the code that already knows what to do with clang-cl: it replaces cl_<arch> and adds
+-m64/-m32, which is how Chromium's clang-cl Windows build reaches the same place.
+The path is used as given, so hand it an absolute one (it usually contains spaces,
+which is why an environment variable is the friendlier of the two inputs).
+
+The second hunk is about the architecture name. common.gypi writes
+`msvs_configuration_platform` as lowercase "arm64", while this map only listed the
+MSBuild spelling "ARM64", so GetArch fell through to its x86 default and an arm64
+build silently compiled with the 32-bit toolchain environment.
+
+Verified on Linux by generating the ninja files with the Windows flavour
+(./configure --ninja --dest-os=win ..., with GYP_MSVS_OVERRIDE_PATH pointing at a
+dummy Visual Studio and -G ninja_use_custom_environment_files=1):
+
+    cl_arm64 = "C:\Program Files\LLVM\bin\clang-cl" -m64
+    cl_x64   = "C:\Program Files\LLVM\bin\clang-cl" -m64
+    cl_x86   = "C:\Program Files\LLVM\bin\clang-cl" -m32
+
+  without this patch those three name .../MSVC/<version>/bin/Hostx64/x64/cl.exe, and
+  the C++ standard Node asks for never reaches the command line.
+
+--- a/tools/gyp/pylib/gyp/generator/ninja.py
++++ b/tools/gyp/pylib/gyp/generator/ninja.py
+@@ -2302,6 +2302,19 @@
+     if mac_toolchain_dir := generator_flags.get("mac_toolchain_dir", None):
+         wrappers["LINK"] = "export DEVELOPER_DIR='%s' &&" % mac_toolchain_dir
+ 
++    # GodotJS: let the caller name clang-cl without a make_global_settings entry.
++    # The block below already knows how to compile with clang-cl when CC came from
++    # make_global_settings, but gyp requires that entry to be identical in every
++    # .gyp file of the build (assert further down), and Node's build files do not
++    # share one top-level include, so a build file cannot carry it alone. Node 24 and
++    # newer require clang-cl on Windows, so the path is taken from -G clang_cl=<path>
++    # or GODOTJS_NODE_CLANG_CL here, as an absolute path, and used exactly like the
++    # make_global_settings one.
++    if not clang_cl:
++        clang_cl = generator_flags.get(
++            "clang_cl", None
++        ) or os.environ.get("GODOTJS_NODE_CLANG_CL", "")
++
+     if flavor == "win":
+         configs = [
+             target_dicts[qualified_target]["configurations"][config_name]
+--- a/tools/gyp/pylib/gyp/msvs_emulation.py
++++ b/tools/gyp/pylib/gyp/msvs_emulation.py
+@@ -327,7 +327,13 @@
+         if not platform:  # If no specific override, use the configuration's.
+             platform = configuration_platform
+         # Map from platform to architecture.
+-        return {"Win32": "x86", "x64": "x64", "ARM64": "arm64"}.get(platform, "x86")
++        return {
++            "Win32": "x86",
++            "x86": "x86",
++            "x64": "x64",
++            "ARM64": "arm64",
++            "arm64": "arm64",
++        }.get(platform, "x86")
+ 
+     def _TargetConfig(self, config):
+         """Returns the target-specific configuration."""

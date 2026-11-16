@@ -32,11 +32,17 @@
 # Studio environment by itself. Actually compiling with clang-cl needs two more
 # things, and the CI job adds both:
 #
-#   -Dclang_cl=<absolute path to clang-cl>
-#       gyp uses a make_global_settings CC entry ending in "clang-cl" as the
-#       compiler; node.gyp has no such entry, so patches/godotjs-node-clang-cl-ninja.patch
-#       adds one that reads this variable. ./configure passes leftover arguments on
-#       to gyp, which is how the value arrives.
+#   GODOTJS_NODE_CLANG_CL=<absolute path to clang-cl>   (environment variable)
+#       gyp's ninja generator only switches compilers when it is handed a
+#       make_global_settings CC entry ending in "clang-cl", and it requires that entry
+#       to be identical in the top level of every .gyp file of the build - Node's build
+#       files share no single top-level include, so node.gyp cannot carry it alone.
+#       patches/godotjs-gyp-win-clang-cl.patch therefore adds a hook that reads this
+#       variable (or -G clang_cl=<path>) and feeds the same code path. prepare_node_build.sh
+#       stops when --dest-os=win is built without it, because the alternative is cl.exe
+#       and Node 24 and newer cannot be built with cl.exe.
+#       The value has to end in clang-cl with no .exe, and a space in the path is fine
+#       (LLVM normally installs to C:\Program Files\LLVM\bin).
 #   CXXFLAGS=/std:c++20 (and CXXFLAGS_host for the build-time tools)
 #       the C++ standard. Node asks for it through msvs_settings' LanguageStandard,
 #       which gyp marks as MSBuild-only, so with --ninja the compile line gets no

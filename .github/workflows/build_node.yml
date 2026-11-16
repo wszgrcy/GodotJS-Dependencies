@@ -79,19 +79,21 @@ jobs:
             {"platform": "macos", "arch": "x86_64", "runner": "macos-latest",
              "cargo_target": "x86_64-apple-darwin"},
             {"platform": "windows", "arch": "x86_64", "runner": "windows-2022"},
-            # arm64 Windows is not in the matrix, because building it from this x64
-            # runner needs two things that no supported path provides:
-            #   - the compiler: gyp's clang-cl hook only adds -m64/-m32, and clang-cl
-            #     on an x64 host cannot produce arm64 objects without also being given
-            #     --target=aarch64-windows-msvc. Upstream does that inside MSBuild's
-            #     ClangCL toolset (vcbuild -ClangCL), which the ninja path cannot reach.
-            #   - Temporal: the Rust archive collision of a split toolset on Windows
-            #     (gen/arm64/release/node_crates.lib produced twice). Node's own fix
-            #     (patches/node-66823-rust-host-target.patch) skips Windows on purpose,
-            #     and the Windows branch of deps/crates/crates.gyp routes cargo through
-            #     cargo_build.py <(target_arch), which is the same name in both toolsets.
-            # On a native arm64 Windows runner neither problem exists (no toolset split,
-            # clang-cl targets its own arch), so add the entry back there:
+            # arm64 Windows is not in the matrix. Building it from this x64 runner runs
+            # into three separate gaps, each checked locally by generating the ninja
+            # files with the Windows flavour:
+            #   - the host toolset: gyp gives the host and the target toolset the same
+            #     architecture (obj.host/*/….ninja said `arch = environment.arm64`), and
+            #     the build-time tools (mksnapshot, torque) have to run on the runner.
+            #   - the compiler: gyp's clang-cl hook only adds -m64/-m32, and clang-cl on
+            #     an x64 host cannot emit arm64 objects without also being given
+            #     --target=aarch64-windows-msvc. Upstream reaches that through MSBuild's
+            #     ClangCL toolset (vcbuild), which the ninja path cannot see.
+            #   - Temporal: with a split toolset the Rust archive collides (ninja: multiple
+            #     rules generate gen/arm64/release/node_crates.lib), and Node's own fix
+            #     (patches/node-66823-rust-host-target.patch) skips Windows on purpose.
+            # A native arm64 Windows runner removes all three (no toolset split, clang-cl
+            # targets its own architecture), so add the entry back there:
             #   {"platform": "windows", "arch": "arm64", "runner": "<native arm64>"}
             # The argument file node.windows_arm64.configure.txt is kept as the recipe.
             # Cross builds: the host machine is the same Linux x86_64 runner for
@@ -334,10 +336,12 @@ jobs:
               # The version alone does not make ninja compile with clang-cl.
               # ./configure --clang-cl records the toolchain in the generated config;
               # choosing the compiler is gyp's job, and its ninja generator looks cl.exe
-              # up through the Visual Studio environment. gyp only accepts a different
-              # compiler as an absolute path in a make_global_settings CC entry, which
-              # is what the clang_cl hook under patches/ feeds it, so the path is
-              # recorded here and added to the configure arguments in the Build step.
+              # up through the Visual Studio environment. The only thing gyp lets you
+              # hand another compiler to is a make_global_settings CC entry, and gyp
+              # requires that entry in every .gyp file of the build, so Node cannot carry
+              # it - see patches/godotjs-gyp-win-clang-cl.patch, which adds a hook reading
+              # GODOTJS_NODE_CLANG_CL. The path goes in as an environment variable rather
+              # than a configure argument because it usually contains spaces.
               # clang-cl can only be handed to gyp when the runner builds for its own
               # architecture. A cross build would additionally need
               # --target=aarch64-windows-msvc, and gyp's clang-cl hook only appends
@@ -368,12 +372,13 @@ jobs:
                     exit 1
                     ;;
                 esac
-                echo "NODE_CLANG_CL_PATH=$clang_cl_path" >> "$GITHUB_ENV"
+                echo "GODOTJS_NODE_CLANG_CL=$clang_cl_path" >> "$GITHUB_ENV"
                 echo "ninja will compile with: $clang_cl_path"
               else
                 echo "arch $NODE_ARCH is not the runner's arch ($win_host_arch): clang-cl"
-                echo "  would also need --target=aarch64-windows-msvc, which gyp cannot be"
-                echo "  given, so ninja keeps cl.exe."
+                echo "  would also need --target=aarch64-windows-msvc, and gyp gives the"
+                echo "  host toolset the same architecture as the target, so a cross"
+                echo "  Windows build cannot work here (see the note in the matrix)."
               fi
 
               # gyp's ninja generator works out which Visual Studio to use by reading
@@ -581,13 +586,9 @@ jobs:
             printf -- '--clang-cl=%s\n' "$NODE_CLANG_CL_VERSION" >> args.txt
           fi
 
-          # Windows only, and only for x86_64 (see the toolchain step): the absolute
-          # path that makes ninja use clang-cl instead of cl.exe. Leftover ./configure
-          # arguments are passed to gyp, so this arrives as a gyp variable.
-          if [ -n "${NODE_CLANG_CL_PATH:-}" ]; then
-            printf -- '-Dclang_cl=%s\n' "$NODE_CLANG_CL_PATH" >> args.txt
-          fi
-
+          # Windows only, and only when the runner builds for its own architecture
+          # (see the toolchain step): the path that makes ninja use clang-cl is carried
+          # in GODOTJS_NODE_CLANG_CL, because it usually contains spaces.
           if [ "$NODE_PLATFORM" = windows ]; then
             # Neither compiler gets a C++ standard from Node's build under ninja:
             # common.gypi puts it in msvs_settings' LanguageStandard when clang-cl is

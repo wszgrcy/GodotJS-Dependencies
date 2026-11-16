@@ -29,16 +29,22 @@
 # hand on Windows means adding that option yourself, with the version you have.
 #
 # --clang-cl only records which toolchain the build is meant for; it does not change
-# the compiler ninja runs. gyp's ninja generator looks cl.exe up through the Visual
-# Studio environment by itself. Two more things are needed to really compile with
-# clang-cl, and they are described in node.windows_x86_64.configure.txt: handing gyp
-# the compiler path (-Dclang_cl=<path>, which patches/godotjs-node-clang-cl-ninja.patch
-# feeds to make_global_settings) and exporting CXXFLAGS=/std:c++20, because Node asks
-# for the standard through msvs_settings' LanguageStandard and gyp marks that as
-# MSBuild-only, so ninja drops it and the compiler falls back to its own default.
+# the compiler ninja runs. Two more things are needed to really compile with clang-cl,
+# and they are described in node.windows_x86_64.configure.txt: handing gyp the compiler
+# path through GODOTJS_NODE_CLANG_CL (patches/godotjs-gyp-win-clang-cl.patch reads it
+# inside gyp) and exporting CXXFLAGS=/std:c++20, because Node asks for the standard
+# through msvs_settings' LanguageStandard and gyp marks that as MSBuild-only, so ninja
+# drops it and the compiler falls back to its own default.
 #
-# The job applies both when the runner's architecture matches the target, which is the
-# case on a native arm64 runner. It does not when the two differ: clang-cl on an x64
-# host also needs --target=aarch64-windows-msvc, which gyp's clang-cl hook cannot pass
-# (it only appends -m32/-m64). Building this file by hand on an x64 machine therefore
-# means either running on an arm64 machine or adding that flag to CXXFLAGS yourself.
+# None of that is enough for arm64 from an x64 machine, and this file is only a recipe
+# for a native arm64 Windows machine, because three separate gaps all have to close:
+#   - gyp gives the host toolset the same architecture as the target, so the build-time
+#     tools (mksnapshot, torque) would be built as arm64 and could not run on the runner.
+#     Generating the ninja files with the Windows flavour shows it directly:
+#     obj.host/... says `arch = environment.arm64`.
+#   - clang-cl on an x64 host needs --target=aarch64-windows-msvc as well, and gyp's
+#     clang-cl hook only appends -m32/-m64.
+#   - Temporal's Rust archive collides between the two toolsets (the guard in
+#     prepare_node_build.sh explains it and the two ways out).
+# A native arm64 machine has no toolset split and clang-cl already targets its own
+# architecture, so only the Temporal note stays relevant there.

@@ -300,6 +300,22 @@ apply_build_patch() {
   rm -f "$plain"
 }
 
+# --- Windows: clang-cl has to be named, ninja will not guess it ------------------
+# Node 24 and newer are built on Windows with clang-cl, and ./configure --clang-cl=<v>
+# only records the toolchain in the generated config; the compiler is chosen by gyp.
+# The hook that lets gyp be told (patches/godotjs-gyp-win-clang-cl.patch) reads the
+# path from GODOTJS_NODE_CLANG_CL, so stopping here is what keeps a Windows bundle
+# from being built with cl.exe - which upstream no longer supports.
+if [ "$dest_os" = win ] && [ -z "${GODOTJS_NODE_CLANG_CL:-}" ]; then
+  echo "prepare_node_build: --dest-os=win needs GODOTJS_NODE_CLANG_CL set to the" >&2
+  echo "  absolute path of clang-cl, for example:" >&2
+  echo "    GODOTJS_NODE_CLANG_CL='C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Tools\\Llvm\\x64\\bin\\clang-cl'"
+  echo "  Without it gyp keeps using cl.exe, and Node 24 and newer cannot be built"
+  echo "  with cl.exe (V8 dropped MSVC support after version 13.0)."
+  echo "  The value must end in clang-cl, and .exe has to be left off."
+  exit 1
+fi
+
 if ! command -v git >/dev/null 2>&1; then
   echo "prepare_node_build: git is needed to apply the patches under patches/" >&2
   exit 1
@@ -308,8 +324,8 @@ apply_build_patch "$SCRIPT_DIR/patches/node-66804-single-producer.patch" \
                   "nodejs/node#66804 (single producer for shared generated files)" cross
 apply_build_patch "$SCRIPT_DIR/patches/node-66823-rust-host-target.patch" \
                   "nodejs/node#66823 (per-toolset Rust archives for Temporal cross builds)" cross
-apply_build_patch "$SCRIPT_DIR/patches/godotjs-node-clang-cl-ninja.patch" \
-                  "our clang_cl hook that lets ninja use clang-cl on Windows" always
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-clang-cl.patch" \
+                  "our gyp hook that lets ninja use clang-cl on Windows" always
 
 # --- MSBuild's $(Platform) cannot survive into a ninja file ---------------------
 # deps/crates/crates.gyp builds the Rust side of Temporal. On Windows it names the
