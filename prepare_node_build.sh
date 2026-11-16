@@ -327,7 +327,7 @@ apply_build_patch "$SCRIPT_DIR/patches/node-66823-rust-host-target.patch" \
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-clang-cl.patch" \
                   "our gyp hook that lets ninja use clang-cl on Windows" always
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-rsp-path-arg.patch" \
-                  "our gyp fix that keeps the name= part of path arguments on Windows" always
+                  "our gyp fix that keeps option values and C-string defines out of path normalization" always
 
 # --- Windows: torque cannot be handed backslash-separated paths ------------------
 # On Windows gyp writes an action's whole command line into a .rsp file, and while
