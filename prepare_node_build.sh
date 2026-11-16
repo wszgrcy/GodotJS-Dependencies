@@ -326,6 +326,8 @@ apply_build_patch "$SCRIPT_DIR/patches/node-66823-rust-host-target.patch" \
                   "nodejs/node#66823 (per-toolset Rust archives for Temporal cross builds)" cross
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-clang-cl.patch" \
                   "our gyp hook that lets ninja use clang-cl on Windows" always
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-rsp-path-arg.patch" \
+                  "our gyp fix that keeps the name= part of path arguments on Windows" always
 
 # --- MSBuild's $(Platform) cannot survive into a ninja file ---------------------
 # deps/crates/crates.gyp builds the Rust side of Temporal. On Windows it names the

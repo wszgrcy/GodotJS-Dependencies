@@ -1,0 +1,59 @@
+Stop gyp from rewriting the value part of a name=value argument on Windows
+
+QuoteForRspFile() in msvs_emulation.py guesses which arguments are paths and runs
+os.path.normpath() over them, because MSVC does not like foo/../bar. The guess is
+"the argument contains a slash", so an argument that merely contains a path is
+normalized as a whole. V8's inspector generator is called that way:
+
+    --config_value protocol.path=../../deps/v8/include/js_protocol.pdl
+
+normpath reads "protocol.path=.." as a directory, the ".." after it cancels it, and
+what reaches the .rsp file is
+
+    "--config_value" "deps/v8/include/js_protocol.pdl"
+
+code_generator.py then parses the config file, finds no path entry in it and stops:
+
+    AttributeError: 'X' object has no attribute 'path'
+    FAILED: gen/inspector-generated-output-root/src/inspector/protocol/Forward.h ...
+
+That is the first action after ICU in a Windows build (ninja 1130/4414). Only the
+Windows flavour is affected: QuoteForRspFile is used for the .rsp files that gyp's
+Windows ninja rules run through. Linux and macOS pass the argument as it is.
+
+Normalizing only what follows the first "=" fixes it without changing any other
+argument: text before an "=" is not a path spelling, and options that do carry a
+path after "=" (MSVC's /Foout/..., -DFOO=/a/b/../c) still get their paths
+normalized.
+
+Verified on Linux by generating the ninja files with the Windows flavour
+(./configure --ninja --dest-os=win ..., dummy Visual Studio through
+GYP_MSVS_OVERRIDE_PATH, -G ninja_use_custom_environment_files=1), in
+obj/tools/v8_gypfiles/v8_inspector_headers.ninja:
+
+    before: "--config_value" "deps/v8/include/js_protocol.pdl"
+    after:  "--config_value" "protocol.path=../../deps/v8/include/js_protocol.pdl"
+
+--- a/tools/gyp/pylib/gyp/msvs_emulation.py
++++ b/tools/gyp/pylib/gyp/msvs_emulation.py
+@@ -32,7 +32,18 @@
+ 
+     # Use a heuristic to try to find args that are paths, and normalize them
+     if arg.find("/") > 0 or arg.count("/") > 1:
+-        arg = os.path.normpath(arg)
++        # GodotJS: for a name=value argument, normalize only the value. Running
++        # normpath over the whole argument treats "protocol.path=.." as a
++        # directory, which the following ".." cancels, so V8's inspector
++        # --config_value protocol.path=../../include/js_protocol.pdl came out as
++        # ../../include/... with the "protocol.path=" gone (and then the code
++        # generator fails with "'X' object has no attribute 'path'").
++        eq = arg.find("=")
++        slash = arg.find("/")
++        if 0 < eq < slash:
++            arg = arg[: eq + 1] + os.path.normpath(arg[eq + 1 :])
++        else:
++            arg = os.path.normpath(arg)
+ 
+     # For a literal quote, CommandLineToArgvW requires 2n+1 backslashes
+     # preceding it, and results in n backslashes + the quote. So we substitute
+     in 2* what we match, +1 more, plus the quote.
