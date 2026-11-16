@@ -702,7 +702,12 @@ jobs:
           # backslash inside a bash double-quoted string is not a separator, so the
           # file could not be created at all and the report below printed nothing.
           ninja_log="$PWD/.ninja-build.log"
-          if ninja -C out/Release node 2>&1 | tee "$ninja_log"; then
+          # -k 20 keeps going after the first failure. Failures in independent
+          # libraries (one archive, one link) are worth seeing in the same run: a
+          # Windows round costs about 40 minutes, and stopping at the first one means
+          # one bug discovered per round. The report below still starts from the
+          # earliest FAILED line.
+          if ninja -C out/Release -k 20 node 2>&1 | tee "$ninja_log"; then
             :
           else
             # Printed plainly rather than inside a ::group::, because a collapsed
@@ -778,6 +783,61 @@ jobs:
             console.log("node smoke ok");
           '
           fi
+
+      - name: Check the assembled OpenSSL objects reached the library
+        # Runs even when the build failed, because "is the archive complete?" is the
+        # first thing to know.
+        #
+        # On Windows OpenSSL's hand-written assembly (nasm syntax .asm) is built by a
+        # gyp rule, and in a ninja file a rule's output only joins the target's
+        # objects when the rule says process_outputs_as_sources - Node's rules do not
+        # say it, so every .asm was assembled into a loose .obj that no archive ever
+        # contained. That looks healthy for 2000 targets and then fails at link time
+        # with unresolved symbols that only those files define (OPENSSL_cleanse,
+        # aesni_encrypt, OPENSSL_ia32cap_P, ...). Reading the archive's member list
+        # answers the question directly, however far the build got.
+        # See patches/godotjs-openssl-win-asm-outputs-as-sources.patch.
+        if: always()
+        run: |
+          # Reporting only: nothing in here may end the job on its own.
+          set +e
+          [ "$NODE_PLATFORM" = windows ] || exit 0
+          [ "$NODE_ARCH" = x86_64 ] || { echo "no nasm-built assembly for $NODE_ARCH"; exit 0; }
+          ossl=out/Release/obj/deps/openssl/openssl.lib
+          if [ ! -f "$ossl" ]; then
+            echo "$ossl was not produced; the build did not get that far"
+            exit 0
+          fi
+          members="$PWD/.openssl-lib-members.txt"
+          lib /NOLOGO /LIST "$ossl" > "$members" 2>&1
+          if ! grep -q '\.obj' "$members"; then
+            lib.exe /NOLOGO /LIST "$ossl" > "$members" 2>&1
+          fi
+          asm_members="$(grep -c '-x86_64\.obj' "$members" 2>/dev/null || true)"
+          echo "members in openssl.lib: $(grep -c '\.obj' "$members" 2>/dev/null), of which ${asm_members:-0} are assembled from .asm"
+          if [ "${asm_members:-0}" = 0 ]; then
+            echo "lib.exe could not list the archive; its output was:"
+            head -5 "$members"
+            exit 1
+          fi
+          missing=0
+          for asm_obj in x86_64cpuid.obj aes-x86_64.obj aesni-x86_64.obj; do
+            if grep -q "$asm_obj" "$members"; then
+              echo "in the archive: $asm_obj"
+            else
+              echo "NOT in the archive: $asm_obj"
+              missing=1
+            fi
+          done
+          if [ "$missing" = 1 ]; then
+            echo "The nasm objects are assembled but not archived, so anything that"
+            echo "links openssl.lib is missing their symbols. Check that"
+            echo "patches/godotjs-openssl-win-asm-outputs-as-sources.patch applied"
+            echo "(the Build log says 'applied ... openssl' near the top)."
+            grep -m5 'x86_64' "$members"
+            exit 1
+          fi
+          echo "openssl.lib carries the assembled assembly objects"
 
       - name: Package
         run: |

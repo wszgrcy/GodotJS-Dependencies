@@ -1,0 +1,44 @@
+--- a/deps/openssl/openssl_asm.gypi
++++ b/deps/openssl/openssl_asm.gypi
+@@ -26,6 +26,9 @@
+         {
+           'rule_name': 'Assemble',
+           'extension': 'asm',
++          # Without this the assembled .obj is built but never added to the target's
++          # objects, so the archive lacks every symbol these files define.
++          'process_outputs_as_sources': 1,
+           'inputs': [],
+           'outputs': [
+             '<(INTERMEDIATE_DIR)/<(RULE_INPUT_ROOT).obj',
+@@ -52,6 +55,9 @@
+         {
+           'rule_name': 'Assemble',
+           'extension': 'asm',
++          # Without this the assembled .obj is built but never added to the target's
++          # objects, so the archive lacks every symbol these files define.
++          'process_outputs_as_sources': 1,
+           'inputs': [],
+           'outputs': [
+             '<(INTERMEDIATE_DIR)/<(RULE_INPUT_ROOT).obj',
+--- a/deps/openssl/openssl_asm_avx2.gypi
++++ b/deps/openssl/openssl_asm_avx2.gypi
+@@ -24,6 +24,9 @@
+         {
+           'rule_name': 'Assemble',
+           'extension': 'asm',
++          # Without this the assembled .obj is built but never added to the target's
++          # objects, so the archive lacks every symbol these files define.
++          'process_outputs_as_sources': 1,
+           'inputs': [],
+           'outputs': [
+             '<(INTERMEDIATE_DIR)/<(RULE_INPUT_ROOT).obj',
+@@ -52,6 +55,9 @@
+         {
+           'rule_name': 'Assemble',
+           'extension': 'asm',
++          # Without this the assembled .obj is built but never added to the target's
++          # objects, so the archive lacks every symbol these files define.
++          'process_outputs_as_sources': 1,
+           'inputs': [],
+           'outputs': [
+             '<(INTERMEDIATE_DIR)/<(RULE_INPUT_ROOT).obj',

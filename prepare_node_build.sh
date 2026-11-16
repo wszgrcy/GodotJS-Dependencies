@@ -356,6 +356,26 @@ apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-rsp-path-arg.patch" \
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-torque-path-separator.patch" \
                   "our torque fix for backslash-separated source paths" always
 
+# --- Windows: the assembled OpenSSL assembly never reached the library ----------------
+# OpenSSL's fast paths are hand-written assembly. On Windows those .asm files are in
+# nasm syntax, so gyp builds them with a rule that runs nasm and writes one .obj per
+# file (39 of them for VC-WIN64A). In a ninja file, a rule's output only joins the
+# target's objects if the rule declares process_outputs_as_sources, and Node's rules
+# do not - so ninja assembled every .asm and then archived openssl.lib without any
+# of those objects in it. Nothing warns: on 26.13.1 windows/x86_64 the build reached
+# 3829/4234 with all the assembly assembled, and then openssl-cli.exe failed to link
+# with 155 unresolved external symbols (OPENSSL_cleanse, aesni_encrypt,
+# OPENSSL_ia32cap_P, ChaCha20_ctr32, ...), every one of them defined only in that
+# assembly. Node's own Windows build is unaffected because it goes through MSBuild,
+# which wires a rule's outputs into the project by a different mechanism.
+#
+# gyp's ninja generator does accept object files in a target's sources - it has a
+# branch for "actions/rules output 'sources' that are already object files" - so
+# setting the flag is the intended switch rather than a workaround, and the other
+# generators (make, cmake, xcode, msvs) read the same flag.
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-openssl-win-asm-outputs-as-sources.patch" \
+                  "our gyp fix that puts the assembled OpenSSL objects in the library" always
+
 # --- MSBuild's $(Platform) cannot survive into a ninja file ---------------------
 # deps/crates/crates.gyp builds the Rust side of Temporal. On Windows it names the
 # output directory and passes the platform to deps/crates/cargo_build.py with
