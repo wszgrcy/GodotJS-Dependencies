@@ -204,37 +204,6 @@ print(len(re.findall(r"openssl\.gen/[A-Za-z0-9_.\-]+\.obj", "\n".join(block))))
 PY
 }
 
-# clang-cl refuses a command whose /Yc and /Yu name different files - it drops both
-# flags and writes no .pch, which only shows up when the next compile cannot find it.
-# So the two values in a target's precompiled header step have to agree exactly.
-pch_flags_agree() { # <ninja file> <pch object name>
-  python3 - "$1" "$2" <<'PY'
-import re
-import sys
-
-# A build edge and the variables below it can be wrapped with "$" at the end of a
-# line; unfold those first so each edge is one line.
-text = re.sub(r"\$\s*\n\s*", " ", open(sys.argv[1]).read())
-edge = re.search(
-    r"build [^:\n]*" + re.escape(sys.argv[2]) + r": cxx ", text
-)
-if not edge:
-    print("no-pch-build-edge")
-    raise SystemExit
-after = text[edge.end() :]
-stop = after.find("\nbuild ")
-flags = after if stop < 0 else after[:stop]
-yu = re.findall(r"/Yu([^ \n]+)", flags)
-yc = re.findall(r"/Yc([^ \n]+)", flags)
-if not yu or not yc:
-    print("no-pch-flags")
-elif yu[0] == yc[0]:
-    print("same")
-else:
-    print(f"differ  /Yu={yu[0]}  /Yc={yc[0]}")
-PY
-}
-
 # ---------------------------------------------------------------------------
 # 2. Unpack, prepare, configure, generate
 # ---------------------------------------------------------------------------
@@ -347,17 +316,16 @@ check_present "$node_src/out/Release/obj/node_base.ninja" \
 check_present "$node_src/out/Release/obj/tools/v8_gypfiles/v8_base_without_compiler.ninja" \
   "/Yu../../deps/v8/../../tools/msvs/pch/v8_pch.h" \
   "the v8 precompiled header path is untouched"
-for edge in "obj/node_base.ninja node_base.node_pch.obj" \
-            "obj/tools/v8_gypfiles/v8_base_without_compiler.ninja v8_base_without_compiler.v8_pch.obj"; do
-  set -- $edge
-  agree="$(pch_flags_agree "$node_src/out/Release/$1" "$2")"
-  if [ "$agree" = same ]; then
-    say "OK: $2 is created and used through the same header spelling"
-  else
-    say "  FAIL: $2 - clang-cl drops both flags when they differ: $agree"
-    problems=$((problems + 1))
-  fi
-done
+# clang-cl compares the /Yc and /Yu header names as plain strings and drops both
+# flags when they differ, so in every target the step that creates the .pch and the
+# compiles that use it have to name the header identically. The same check the build
+# runs, in report-only mode: it looks at every ninja file, not just these two.
+if python3 "$repo/tools/fix_windows_pch_flags.py" "$node_src/out/Release" --check; then
+  say "OK: the generated ninja files agree on the precompiled header everywhere"
+else
+  say "  FAIL: the generated ninja files disagree about the precompiled header"
+  problems=$((problems + 1))
+fi
 # With clang-cl, mksnapshot's .S is converted to a .cc and only the .cc is compiled.
 # An asm edge here means ml64 gets a file it cannot read, and the blob symbols would
 # be defined twice if it could.
