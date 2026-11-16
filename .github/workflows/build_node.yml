@@ -634,7 +634,53 @@ jobs:
           printf 'configure %s\n' "${NODE_ARGS[*]}"
           python3 ./configure "${NODE_ARGS[@]}"
 
-          ninja -C out/Release node
+          # Build, keeping the log so a failure can be described without running the
+          # whole build again: on a Windows runner a rerun costs about half an hour,
+          # and the facts below are the ones that tell "generated file incomplete"
+          # from "compile given the wrong include path".
+          ninja_log="${RUNNER_TEMP:-/tmp}/ninja-build.log"
+          if ninja -C out/Release node > "$ninja_log" 2>&1; then
+            tail -3 "$ninja_log"
+          else
+            echo "::group::ninja failed - what the build left behind"
+            tail -60 "$ninja_log"
+            echo "--- compiler that was used ---"
+            grep -m1 -oE '[^ "]*(clang-cl|cl)\.exe[^"]*' "$ninja_log" || true
+            echo "--- torque output an embedder header needs ---"
+            tq=out/Release/gen/torque-generated/src/objects/torque-defined-classes-tq.inc
+            if [ -f "$tq" ]; then
+              echo "$tq: $(grep -c '' "$tq") lines, $(grep -c '^class ' "$tq") class definitions"
+              grep -m3 '^class ' "$tq" || true
+            else
+              echo "$tq was not produced"
+            fi
+            failed_line=$(grep -m1 '^FAILED:' "$ninja_log" || true)
+            # "FAILED: [code=1] <target> [more targets...]" - the first target is the
+            # one worth looking at. Older ninja prints "FAILED: <target>".
+            failed_target=${failed_line#*'] '}
+            if [ "$failed_target" = "$failed_line" ]; then
+              failed_target=${failed_line#*: }
+            fi
+            failed_target=${failed_target%% *}
+            case $failed_line in
+              FAILED*) have_failed=1 ;;
+              *) have_failed=0 ;;
+            esac
+            if [ "$have_failed" = 1 ]; then
+              echo "--- first failed target: $failed_target ---"
+              (cd out/Release && ninja -t commands "$failed_target" 2>/dev/null | tail -1) || true
+              # The response file ninja wrote holds the include path list that the
+              # compiler actually saw.
+              rsp_token=$(cd out/Release && ninja -t commands "$failed_target" 2>/dev/null \
+                | tail -1 | tr ' ' '\n' | grep -m1 '\.rsp$' || true)
+              if [ -n "$rsp_token" ] && [ -f "out/Release/$rsp_token" ]; then
+                echo "include path in out/Release/$rsp_token:"
+                tr ' ' '\n' < "out/Release/$rsp_token" | grep -E '^/(I|external:I)' | head -30
+              fi
+            fi
+            echo "::endgroup::"
+            exit 1
+          fi
 
           # No object cleanup here, on purpose. On Linux Node's .a files are thin
           # archives: they store the paths of their object files rather than their
