@@ -285,6 +285,15 @@ jobs:
                 {
                   echo "CC_target=$xc_bin/cc"
                   echo "CXX_target=$xc_bin/cxx"
+                  # The host toolset (mksnapshot, torque, the other programs the build
+                  # runs on the runner itself) has to be compiled by the runner's own
+                  # compiler. gyp looks only at CC_host/CXX_host for it and otherwise
+                  # reuses the target compiler (generator/ninja.py: `if not cc_host:
+                  # cc_host = cc`), which would build those programs as $NODE_ARCH and
+                  # then be unable to run them: the arm64 sources the build picks for
+                  # the host toolset would be handed to an x86_64 compiler.
+                  echo "CC_host=cc"
+                  echo "CXX_host=c++"
                   # The bundle check compiles its probe with the target compiler, so the
                   # probe comes out as $NODE_ARCH like everything else in the bundle.
                   echo "NODE_VERIFY_CXX=$xc_bin/cxx"
@@ -492,6 +501,12 @@ jobs:
                 echo "AR_target=$ndk_bin/llvm-ar"
                 echo "NM_target=$ndk_bin/llvm-nm"
                 echo "READELF_target=$ndk_bin/llvm-readelf"
+                # The host toolset has to stay on the runner's compiler, or mksnapshot
+                # and torque are built as the Android architecture and cannot be run
+                # during the build (gyp reuses the target compiler unless CC_host and
+                # CXX_host say otherwise). Same for iOS below.
+                echo "CC_host=cc"
+                echo "CXX_host=c++"
                 # The bundle cannot be executed here, so the check stops after the
                 # link. That still proves the archives are complete and in the order
                 # link.txt claims.
@@ -522,6 +537,10 @@ jobs:
                 echo "CXX_target=$xc_bin/cxx"
                 echo "AR_target=$xc_bin/ar"
                 echo "NM_target=$xc_bin/nm"
+                # Host tools stay on the macOS compiler of the runner (see the macOS
+                # cross note above): torque and mksnapshot have to run here.
+                echo "CC_host=cc"
+                echo "CXX_host=c++"
                 # No READELF_target: the Xcode toolchain has no readelf, and a static
                 # build does not reach the rules that would call it.
                 echo "NODE_VERIFY_CXX=$xc_bin/cxx"
