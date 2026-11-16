@@ -1,0 +1,82 @@
+Spell the precompiled header's path the way ninja compiles
+
+Node's Windows build uses a precompiled header, tools/msvs/pch/node_pch.h. gyp turns
+that setting into the /Yu, /FI and /Yc compiler flags and passes the path on
+verbatim, so the value is only correct relative to whatever directory the compiler is
+started in. node.gypi names it from the repository root; ninja starts every compile
+from the build directory (out/Release), so the flag names nothing and clang-cl stops:
+
+    fatal error: 'tools/msvs/pch/node_pch.h' required for precompiled header not found
+
+Source files are unaffected because gyp rewrites source paths into build-relative
+ones; only these flag paths are passed through as written. V8's targets escape the
+problem by accident: tools/v8_gypfiles/v8.gyp spells its header with a leading
+"../../" (its V8_ROOT variable is "../../deps/v8"), which is a build-directory path,
+so V8's precompiled header already worked under ninja. This fix leaves such values
+alone.
+
+node.gypi is deliberately not edited: the same string is handed to cl.exe by the
+MSBuild generator that Node's own vcbuild uses, and changing it there could only be
+checked by building with MSBuild, which this project does not do. The generator that
+introduced the difference is where the fix goes.
+
+--- a/tools/gyp/pylib/gyp/generator/ninja.py
++++ b/tools/gyp/pylib/gyp/generator/ninja.py
+@@ -315,6 +315,42 @@
+         assert "$" not in path, path
+         return os.path.normpath(os.path.join(self.build_to_base, path))
+ 
++    # Flags that pass the precompiled header's path to the compiler. MSVC accepts
++    # both "/Yu<file>" and "/Yu:<file>".
++    PCH_PATH_FLAGS = ("/Yu", "/FI", "/Yc")
++
++    def PchFlagsRelativeToBuildDir(self, flags):
++        """Spell the paths in /Yu, /FI and /Yc relative to the build directory.
++
++        The compiler is handed these strings unchanged and looks the header up
++        through the include path. Under MSBuild it runs from the project
++        directory, so gyp files name the header from there (Node writes
++        "tools/msvs/pch/node_pch.h"); ninja compiles from the build directory,
++        so the same string names nothing and the compiler stops with "required
++        for precompiled header not found". Sources are translated the same way,
++        which is why only the flag paths need fixing. Values that already start
++        with "../" were written for the build directory (V8 does this) and are
++        left alone.
++        """
++        fixed = []
++        for flag in flags:
++            for name in self.PCH_PATH_FLAGS:
++                # "/Yu:path" has to be tried first: "/Yu" alone matches it too.
++                for separator in (":", ""):
++                    prefix = name + separator
++                    if not flag.startswith(prefix):
++                        continue
++                    path = flag[len(prefix) :]
++                    if path and not path.startswith("../") and "$" not in path:
++                        path = self.GypPathToNinja(path)
++                    flag = prefix + path
++                    break
++                else:
++                    continue
++                break
++            fixed.append(flag)
++        return fixed
++
+     def GypPathToUniqueOutput(self, path, qualified=True):
+         """Translate a gyp path to a ninja path for writing output.
+ 
+@@ -1076,8 +1112,12 @@
+         elif self.flavor == "win":
+             asmflags = self.msvs_settings.GetAsmflags(config_name)
+             cflags = self.msvs_settings.GetCflags(config_name)
+-            cflags_c = self.msvs_settings.GetCflagsC(config_name)
+-            cflags_cc = self.msvs_settings.GetCflagsCC(config_name)
++            cflags_c = self.PchFlagsRelativeToBuildDir(
++                self.msvs_settings.GetCflagsC(config_name)
++            )
++            cflags_cc = self.PchFlagsRelativeToBuildDir(
++                self.msvs_settings.GetCflagsCC(config_name)
++            )
+             extra_defines = self.msvs_settings.GetComputedDefines(config_name)
+             # See comment at cc_command for why there's two .pdb files.
+             pdbpath_c = pdbpath_cc = self.msvs_settings.GetCompilerPdbName(

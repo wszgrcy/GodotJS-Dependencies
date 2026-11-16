@@ -328,6 +328,10 @@ apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-clang-cl.patch" \
                   "our gyp hook that lets ninja use clang-cl on Windows" always
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-rsp-path-arg.patch" \
                   "our gyp fix that keeps option values and C-string defines out of path normalization" always
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-pch-path.patch" \
+                  "our gyp fix that spells the Windows precompiled header path for ninja" always
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-v8-snapshot-asm-to-cc.patch" \
+                  "our V8 fix that stops assembling the snapshot blob twice on clang-cl" always
 
 # --- Windows: torque cannot be handed backslash-separated paths ------------------
 # On Windows gyp writes an action's whole command line into a .rsp file, and while

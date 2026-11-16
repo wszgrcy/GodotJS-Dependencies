@@ -1,0 +1,51 @@
+Stop also assembling the snapshot blob when clang-cl takes the C++ route
+
+mksnapshot writes the snapshot blob as a pair of files: snapshot.cc and embedded.S,
+and the v8_snapshot target marks both as sources, so both are compiled. For Windows
+with clang-cl, V8 additionally defines an asm_to_inline_asm action that converts
+embedded.S into embedded.cc, and that C++ file is the one meant to be compiled -
+embedded.S is written in the assembler syntax gcc and clang use, which MASM's ml64
+cannot read. Under ninja on Windows both routes are built, and the build stops at the
+assembler:
+
+    ASM obj\tools\v8_gypfiles\v8_snapshot.gen\v8_snapshot.embedded_asm.obj
+    embedded.S(1) : error A2008:syntax error : /
+    embedded.S(10) : error A2034:must be in segment block
+
+Even if ml64 could read it, the blob symbols would then be defined twice - once in
+embedded.obj, once in embedded_asm.obj - and both objects are listed in v8_snapshot.lib.
+
+So in that configuration the mksnapshot action stops contributing its outputs as
+sources, and snapshot.cc is listed on the target instead. embedded.cc keeps arriving
+through the asm_to_inline_asm action, which still marks its own output as a source.
+
+Nothing changes for gcc/clang on Linux and macOS, where embedded.S really is assembled,
+and nothing changes for cl.exe without clang-cl, where no .cc replacement is generated.
+
+--- a/tools/v8_gypfiles/v8.gyp
++++ b/tools/v8_gypfiles/v8.gyp
+@@ -438,6 +438,14 @@
+           ],
+           'process_outputs_as_sources': 1,
+           'conditions': [
++            # With clang-cl the blob goes to the C++ compiler instead: the
++            # asm_to_inline_asm action on this target turns embedded.S into a .cc.
++            # Assembling the .S as well would define the same symbols twice, and
++            # ml64 cannot read the file's syntax anyway. The C++ output of this
++            # action is listed on the target instead.
++            ['OS=="win" and clang==1', {
++              'process_outputs_as_sources': 0,
++            }],
+             ['v8_random_seed', {
+               'variables': {
+                 'mksnapshot_flags': ['--random-seed', '<(v8_random_seed)'],
+@@ -532,6 +540,9 @@
+           'dependencies': ['abseil.gyp:abseil'],
+         }],
+         ['OS=="win" and clang==1', {
++          'sources': [
++            '<(INTERMEDIATE_DIR)/snapshot.cc',
++          ],
+           'actions': [
+             {
+               'action_name': 'asm_to_inline_asm',
