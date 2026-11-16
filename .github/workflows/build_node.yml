@@ -741,11 +741,15 @@ jobs:
               (cd out/Release && ninja -t query "$failed_target" 2>/dev/null | head -25)
               # The response file ninja wrote holds the include path list that the
               # compiler actually saw; MSVC reads it through @file on the line.
+              # On Windows that @file is not a word of its own - it sits inside the
+              # quoted argument handed to gyp-win-tool - so read it out of the line
+              # rather than by splitting the line into words.
               rsp_token=$(cd out/Release && ninja -t commands "$failed_target" 2>/dev/null \
-                | tail -1 | tr ' ' '\n' | grep -m1 '\.rsp$' | tr -d '@')
+                | tail -1 | grep -oE '@[^ "@]+\.rsp' | head -1 | tr -d '@')
               if [ -n "$rsp_token" ] && [ -f "out/Release/$rsp_token" ]; then
                 echo "include path in out/Release/$rsp_token:"
-                tr ' ' '\n' < "out/Release/$rsp_token" | grep -E '^/(I|external:I)' | head -30
+                # gyp writes -I even for MSVC, and clang-cl takes both spellings.
+                tr ' ' '\n' < "out/Release/$rsp_token" | grep -E '^[-/](I|external:I)' | head -30
               fi
             fi
             exit 1

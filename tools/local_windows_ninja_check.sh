@@ -21,6 +21,10 @@
 #   - Rust's Windows target is usually not installed here, so Temporal is turned
 #     off for the rehearsal. Its absence shows up as node_crates.lib missing from
 #     the archive list, which the summary says out loud.
+#   - ./configure only records clang-cl in the config when it runs on Windows, so
+#     the generated config is edited to say what a Windows runner's would say.
+#     Without that, the snapshot blob takes the assembler route instead of the C++
+#     route and the rehearsal checks a configuration nobody builds.
 #
 # What gets checked afterwards:
 #
@@ -33,6 +37,8 @@
 #      out/Release/node.exe.rsp, which ninja writes at build time, so this script
 #      writes the same content from the ninja files (rspfile_content is
 #      "$in_newline $libs $ldflags").
+#   3. that the two Windows code paths fixed by patches/godotjs-gyp-win-pch-path.patch
+#      and patches/godotjs-v8-snapshot-asm-to-cc.patch look right in the graph.
 #
 # Nothing here runs a compiler: no cl.exe, no link.exe, no nasm. It checks what the
 # build is about to do, not what it produced.
@@ -251,6 +257,24 @@ if [ "$skip_prepare" -eq 0 ]; then
 fi
 
 say "gyp -f ninja-win"
+
+# configure.py's check_compiler() sets clang=1 from --clang-cl only when it runs on
+# Windows (sys.platform == 'win32'), so here it stays 0 even though args.txt carries
+# --clang-cl. A Windows runner therefore generates a different graph: with clang=1,
+# V8 converts the snapshot blob's .S into a .cc instead of assembling it. Say what a
+# Windows runner's config says, so the rehearsal checks that graph.
+python3 - "$node_src/config.gypi" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path).read()
+if '"clang": 1' not in text:
+    text = text.replace('"clang": 0,', '"clang": 1,')
+    text = text.replace('"llvm_version": "0.0",', '"llvm_version": "19.1.5",')
+    open(path, "w").write(text)
+    print("local_windows_ninja_check: config.gypi set to clang=1, as a Windows clang-cl build would")
+PY
+
 ( cd "$node_src" && python3 "$work/gyp_win.py" "$node_src" > "$work/gyp.log" 2>&1 ) || \
   { tail -20 "$work/gyp.log"; fail "gyp failed, full log in $work/gyp.log"; }
 [ -f "$node_src/out/Release/build.ninja" ] || fail "no build.ninja was written"
@@ -260,6 +284,47 @@ say "ninja files written to $node_src/out/Release"
 # 3. The two checks
 # ---------------------------------------------------------------------------
 problems=0
+
+check_present() { # <file> <text> <what it proves>
+  if grep -qF -- "$2" "$1"; then
+    say "OK: $3"
+  else
+    say "  FAIL: $3"
+    say "  looked for: $2"
+    say "  in $1"
+    problems=$((problems + 1))
+  fi
+}
+
+check_absent() { # <file> <text> <what its absence proves>
+  if grep -qF -- "$2" "$1"; then
+    say "  FAIL: $3"
+    say "  did not expect: $2"
+    say "  in $1"
+    problems=$((problems + 1))
+  else
+    say "OK: $3"
+  fi
+}
+
+# ninja starts every compile from out/Release, so the header named by /Yu has to be
+# spelled from there; node.gypi spells it from the repository root and the patch
+# rewrites it. V8 spells its own value build-relative already and must be left alone.
+check_present "$node_src/out/Release/obj/node_base.ninja" \
+  "/Yu../../tools/msvs/pch/node_pch.h" \
+  "the node precompiled header path is spelled for the build directory"
+check_present "$node_src/out/Release/obj/tools/v8_gypfiles/v8_base_without_compiler.ninja" \
+  "/Yu../../deps/v8/../../tools/msvs/pch/v8_pch.h" \
+  "the v8 precompiled header path is untouched"
+# With clang-cl, mksnapshot's .S is converted to a .cc and only the .cc is compiled.
+# An asm edge here means ml64 gets a file it cannot read, and the blob symbols would
+# be defined twice if it could.
+check_absent "$node_src/out/Release/obj/tools/v8_gypfiles/v8_snapshot.ninja" \
+  "embedded_asm" \
+  "the snapshot blob is not also handed to the assembler"
+check_present "$node_src/out/Release/obj/tools/v8_gypfiles/v8_snapshot.ninja" \
+  "v8_snapshot.embedded.obj" \
+  "the snapshot blob reaches v8_snapshot.lib as a C++ object"
 
 asm_count="$(count_asm_in_archive "$node_src/out/Release/obj/deps/openssl/openssl.ninja")"
 say "openssl.lib archive edge carries $asm_count assembled .asm objects"
