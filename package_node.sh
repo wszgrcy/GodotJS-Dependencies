@@ -82,16 +82,20 @@ echo "package_node: Node $NODE_VERSION, $PLATFORM/$ARCH -> node/$PLATFORM_DIR"
 # ---------------------------------------------------------------------------
 # 1. Which archives, in which order, and which ones need --whole-archive
 # ---------------------------------------------------------------------------
-LINK_LIST_SRC="${NODE_LINK_LIST:-}"
-if [ -z "$LINK_LIST_SRC" ]; then
+LINK_LIST="${NODE_LINK_LIST:-}"
+LINK_CMD_SRC=""
+if [ -z "$LINK_LIST" ]; then
   if [ ! -f "$NODE_OUT/build.ninja" ]; then
     echo "package_node: $NODE_OUT has no build.ninja and NODE_LINK_LIST is not set." >&2
-    echo "  Build with ./configure --ninja, or write the tokenised link command of" >&2
-    echo "  the 'node' target to a file and pass it as NODE_LINK_LIST." >&2
+    echo "  Build with ./configure --ninja, or write the link command of the 'node'" >&2
+    echo "  target to a file and pass it as NODE_LINK_LIST." >&2
     exit 1
   fi
-  LINK_LIST_SRC="$STAGING/.node-link-tokens"
-  ninja -C "$NODE_OUT" -t commands node | tail -1 | tr ' ' '\n' > "$LINK_LIST_SRC"
+  # Every command line that leads to `node`, not just the last one: which line is the
+  # real link is decided by tools/parse_node_link.py, because on Windows the archives
+  # sit in a response file and a generator step can end up at the bottom.
+  LINK_CMD_SRC="$STAGING/.node-commands"
+  ninja -C "$NODE_OUT" -t commands node > "$LINK_CMD_SRC"
 fi
 
 WHOLE_FILE="$STAGING/.node-whole"
@@ -99,92 +103,14 @@ PLAIN_FILE="$STAGING/.node-plain"
 SYSTEM_FILE="$STAGING/.node-system"
 : > "$WHOLE_FILE"; : > "$PLAIN_FILE"; : > "$SYSTEM_FILE"
 
-python3 - "$LINK_LIST_SRC" "$WHOLE_FILE" "$PLAIN_FILE" "$SYSTEM_FILE" <<'PY'
-import sys
-
-tokens_path, whole_path, plain_path, system_path = sys.argv[1:5]
-tokens = [line.strip() for line in open(tokens_path, encoding='utf-8') if line.strip()]
-
-whole, plain, system = [], [], set()
-group = plain         # archives before any marker are ordinary archives
-seen_whole, seen_plain = set(), set()
-expect_framework = False
-
-# Without a marker in the link line, these are the archives to force-load. The
-# requirement comes from Node's own build (builtins, snapshot, zlib and libuv
-# initializers live in objects nothing else references), not from the linker - but
-# only GNU ld spells it as a group. ld64 uses -force_load per archive and MSVC
-# uses /WHOLEARCHIVE:, so the token list can arrive with no group marker at all,
-# and then an embedder would silently get a bundle missing its initializers.
-FALLBACK_WHOLE = ['libnode_base.a', 'libv8_base_without_compiler.a', 'libzlib.a',
-                  'libuv.a', 'libv8_snapshot.a', 'libopenssl.a']
-
-def is_our_archive(token):
-    # Our archives come with a path (obj/deps/uv/libuv.a); a toolchain library is
-    # a bare name (ws2_32.lib, and on Linux those arrive as -lws2_32 instead).
-    return (token.endswith('.a') or token.endswith('.lib')) and ('/' in token or '\\' in token)
-
-def add_archive(token, target=None):
-    name = token.replace('\\', '/').rsplit('/', 1)[-1]
-    where = group if target is None else target
-    if name in seen_whole or name in seen_plain:
-        return          # already recorded, whichever group it went to
-    if where is plain:
-        seen_plain.add(name)
-    else:
-        seen_whole.add(name)
-    where.append(name)
-
-for token in tokens:
-    if token == '-Wl,--whole-archive':
-        group = whole
-        continue
-    if token == '-Wl,--no-whole-archive':
-        group = plain
-        continue
-    if token.startswith('/WHOLEARCHIVE:'):
-        # MSVC's spelling (not yet exercised on a runner): the archive follows the
-        # colon, and it is force-loaded on its own.
-        add_archive(token.split(':', 1)[1], whole)
-        continue
-    if token == '-framework':
-        expect_framework = True
-        continue
-    if expect_framework:
-        system.add('-framework ' + token)
-        expect_framework = False
-        continue
-    if is_our_archive(token):
-        add_archive(token)
-    elif token == '-pthread' or token.startswith('-l') and not token.startswith('-labi') or token == '-lm':
-        system.add(token)
-    else:
-        # Bare *.lib names are Windows system libraries (ws2_32.lib, dbghelp.lib).
-        if token.endswith('.lib') and not is_our_archive(token):
-            system.add(token)
-
-if not whole:
-    moved = [name for name in FALLBACK_WHOLE if name in seen_plain]
-    for name in moved:
-        plain.remove(name)
-        seen_plain.discard(name)
-        seen_whole.add(name)
-    whole.extend(moved)
-    print('package_node: the link line carries no whole-archive group (the macOS and '
-          'Windows linkers are told per archive), so these archives were marked '
-          'force-load from the fallback list: ' + ', '.join(moved))
-
-# Order within each group is kept; system flags are order-insensitive.
-open(whole_path, 'w').write(''.join(name + '\n' for name in whole))
-open(plain_path, 'w').write(''.join(name + '\n' for name in plain))
-open(system_path, 'w').write(''.join(flag + '\n' for flag in sorted(system)))
-print(f'package_node: {len(whole)} archive(s) whole-archive, {len(plain)} plain, '
-      f'{len(system)} system flags')
-print('package_node: whole: ' + ', '.join(whole))
-print('package_node: plain: ' + ', '.join(plain))
-if not whole:
-    raise SystemExit('package_node: no archives in the link command - is this the node target?')
-PY
+if [ -n "$LINK_LIST" ]; then
+  python3 "$SCRIPT_DIR/tools/parse_node_link.py" --tokens "$LINK_LIST" \
+    --whole "$WHOLE_FILE" --plain "$PLAIN_FILE" --system "$SYSTEM_FILE"
+else
+  python3 "$SCRIPT_DIR/tools/parse_node_link.py" --commands "$LINK_CMD_SRC" \
+    --out-dir "$NODE_OUT" \
+    --whole "$WHOLE_FILE" --plain "$PLAIN_FILE" --system "$SYSTEM_FILE"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Copy the archives, rewriting the thin ones
