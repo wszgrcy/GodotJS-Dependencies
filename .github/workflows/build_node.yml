@@ -635,26 +635,37 @@ jobs:
           python3 ./configure "${NODE_ARGS[@]}"
 
           # Build, keeping the log so a failure can be described without running the
-          # whole build again: on a Windows runner a rerun costs about half an hour,
-          # and the facts below are the ones that tell "generated file incomplete"
-          # from "compile given the wrong include path".
-          ninja_log="${RUNNER_TEMP:-/tmp}/ninja-build.log"
-          if ninja -C out/Release node > "$ninja_log" 2>&1; then
-            tail -3 "$ninja_log"
+          # whole build again: on a Windows runner a rerun costs about half an hour.
+          # The log lives next to the build, not in $RUNNER_TEMP: on the Windows
+          # runner the GitHub variables hold backslash paths (D:\a\_temp), and a
+          # backslash inside a bash double-quoted string is not a separator, so the
+          # file could not be created at all and the report below printed nothing.
+          set -o pipefail
+          ninja_log="$PWD/.ninja-build.log"
+          if ninja -C out/Release node 2>&1 | tee "$ninja_log"; then
+            :
           else
+            # Nothing in this report may cut the report short; the line that explains
+            # the failure is often the third one after it.
+            set +e
             echo "::group::ninja failed - what the build left behind"
-            tail -60 "$ninja_log"
+            if [ -s "$ninja_log" ]; then
+              echo "--- last 60 lines of the build ---"
+              tail -60 "$ninja_log"
+            else
+              echo "nothing was captured in $ninja_log - ninja did not reach a compile"
+            fi
             echo "--- compiler that was used ---"
-            grep -m1 -oE '[^ "]*(clang-cl|cl)\.exe[^"]*' "$ninja_log" || true
+            grep -m1 -E '(clang-cl|cl)\.exe' "$ninja_log" || echo "(no compiler line in the log)"
             echo "--- torque output an embedder header needs ---"
             tq=out/Release/gen/torque-generated/src/objects/torque-defined-classes-tq.inc
             if [ -f "$tq" ]; then
               echo "$tq: $(grep -c '' "$tq") lines, $(grep -c '^class ' "$tq") class definitions"
-              grep -m3 '^class ' "$tq" || true
+              grep -m3 '^class ' "$tq"
             else
               echo "$tq was not produced"
             fi
-            failed_line=$(grep -m1 '^FAILED:' "$ninja_log" || true)
+            failed_line=$(grep -m1 '^FAILED:' "$ninja_log")
             # "FAILED: [code=1] <target> [more targets...]" - the first target is the
             # one worth looking at. Older ninja prints "FAILED: <target>".
             failed_target=${failed_line#*'] '}
@@ -662,17 +673,13 @@ jobs:
               failed_target=${failed_line#*: }
             fi
             failed_target=${failed_target%% *}
-            case $failed_line in
-              FAILED*) have_failed=1 ;;
-              *) have_failed=0 ;;
-            esac
-            if [ "$have_failed" = 1 ]; then
+            if [ -n "$failed_target" ]; then
               echo "--- first failed target: $failed_target ---"
-              (cd out/Release && ninja -t commands "$failed_target" 2>/dev/null | tail -1) || true
+              (cd out/Release && ninja -t commands "$failed_target" 2>/dev/null | tail -1)
               # The response file ninja wrote holds the include path list that the
-              # compiler actually saw.
+              # compiler actually saw; MSVC reads it through @file on the line.
               rsp_token=$(cd out/Release && ninja -t commands "$failed_target" 2>/dev/null \
-                | tail -1 | tr ' ' '\n' | grep -m1 '\.rsp$' || true)
+                | tail -1 | tr ' ' '\n' | grep -m1 '\.rsp$' | tr -d '@')
               if [ -n "$rsp_token" ] && [ -f "out/Release/$rsp_token" ]; then
                 echo "include path in out/Release/$rsp_token:"
                 tr ' ' '\n' < "out/Release/$rsp_token" | grep -E '^/(I|external:I)' | head -30
