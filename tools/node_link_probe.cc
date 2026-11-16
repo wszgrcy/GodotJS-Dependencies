@@ -85,7 +85,7 @@ using ContextInfo = v8_inspector::V8ContextInfo;
 using Buffer = v8_inspector::StringBuffer;
 using View = v8_inspector::StringView;
 using Create = decltype(&v8_inspector::V8Inspector::create);
-constexpr v8_inspector::V8Inspector::ClientTrustLevel kTrustLevel =
+[[maybe_unused]] constexpr v8_inspector::V8Inspector::ClientTrustLevel kTrustLevel =
     v8_inspector::V8Inspector::ClientTrustLevel::kFullyTrusted;
 }  // namespace inspector_names
 

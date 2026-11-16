@@ -89,12 +89,24 @@ flush_whole() {
   fi
   WHOLE=()
 }
-while read -r kind arg _; do
+while read -r kind arg rest; do
   case "$kind" in
     ''|\#*) continue ;;
     whole) WHOLE+=("$arg") ;;
     plain) flush_whole; LINK_ARGS+=("$PLATFORM_DIR/$arg") ;;
-    system) flush_whole; LINK_ARGS+=("$arg") ;;
+    system)
+      # A system line can carry more than one word: macOS names a system library as
+      # `-framework CoreFoundation`, and the linker needs both words. Passing only
+      # the first makes ld report "framework '-framework' not found", because the
+      # word after it is the next line's -framework.
+      flush_whole
+      LINK_ARGS+=("$arg")
+      if [ -n "$rest" ]; then
+        set -f  # the remainder is a list of linker words, not file names
+        LINK_ARGS+=($rest)
+        set +f
+      fi
+      ;;
     define) CPPFLAGS_EXTRA+=("-D${arg}") ;;
     feature)
       # Not a link input. These record build settings that change the ABI without
@@ -112,6 +124,15 @@ while read -r kind arg _; do
 done < <(grep -vE '^\s*(#|$)' "$PLATFORM_DIR/link.txt")
 flush_whole
 
+# A bare -framework can only mean the framework name after it went missing, and
+# the linker complaint does not say where it came from.
+for token in "${LINK_ARGS[@]+"${LINK_ARGS[@]}"}"; do
+  if [ "$token" = "-framework" ]; then
+    echo "verify_node_bundle: link.txt has -framework with no framework name after it" >&2
+    exit 1
+  fi
+done
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-verify.XXXXXX")"
 # NODE_VERIFY_KEEP=1 leaves the compiled probe behind, so it can be re-run under
 # a debugger or inspected with nm/ldd after the check.
@@ -126,6 +147,9 @@ if [ -n "${NODE_VERIFY_LINK_ONLY:-}" ]; then
   echo "verify_node_bundle: link-only mode (this bundle was built for another target)"
 fi
 
+# Print what link.txt declared as system inputs: when the link fails, it is
+# nearly always one of these (a name, or a flag whose partner word went missing).
+echo "verify_node_bundle: system flags from link.txt: $(awk '$1=="system"{printf "%s ", substr($0, index($0," ")+1)}' "$PLATFORM_DIR/link.txt")"
 echo "verify_node_bundle: compiling the probe with $cxx (C++20, RTTI on, exceptions off)"
 "$cxx" -std=gnu++20 -O1 -g0 -Wall -fno-exceptions \
   -pthread \
