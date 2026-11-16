@@ -1,5 +1,15 @@
 # ./configure arguments for Node.js on macOS x86_64 (Intel).
 # See node.linux_x86_64.configure.txt for what the shared options do.
+#
+# This is built on an arm64 runner, so it is a cross build, and the compiler has to
+# be told which architecture to emit. gyp leaves -arch out on purpose when it is
+# cross-compiling (xcode_emulation.GetLdflags skips it under
+# `if not CrossCompileRequested()`) and expects the toolchain to carry it, so the CI
+# job gives CC_target/CXX_target to wrapper scripts that run
+# `xcrun --sdk macosx clang -arch x86_64`. Without them the compile lines name no
+# architecture, and the first file that needs x86 intrinsics - deps/zlib's SSE2
+# inflate - fails inside emmintrin.h. Host tools keep the runner's architecture, which
+# is why only CC_target/CXX_target are set and not CC/CXX.
 
 --ninja
 --dest-os=mac

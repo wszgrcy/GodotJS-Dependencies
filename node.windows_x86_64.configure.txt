@@ -26,3 +26,23 @@
 # written here: the CI job reads `clang-cl --version` - the same thing Node's own
 # vcbuild.bat does - and appends --clang-cl=<version> to the arguments. Building by
 # hand on Windows means adding that option yourself, with the version you have.
+#
+# --clang-cl only records which toolchain the build is meant for; it does not change
+# the compiler ninja runs. gyp's ninja generator looks cl.exe up through the Visual
+# Studio environment by itself. Actually compiling with clang-cl needs two more
+# things, and the CI job adds both:
+#
+#   -Dclang_cl=<absolute path to clang-cl>
+#       gyp uses a make_global_settings CC entry ending in "clang-cl" as the
+#       compiler; node.gyp has no such entry, so patches/godotjs-node-clang-cl-ninja.patch
+#       adds one that reads this variable. ./configure passes leftover arguments on
+#       to gyp, which is how the value arrives.
+#   CXXFLAGS=/std:c++20 (and CXXFLAGS_host for the build-time tools)
+#       the C++ standard. Node asks for it through msvs_settings' LanguageStandard,
+#       which gyp marks as MSBuild-only, so with --ninja the compile line gets no
+#       standard and each compiler's own default decides: cl.exe is C++14, which is
+#       what made ICU's headers fail to parse; clang-cl is gnu++17, still short of
+#       the C++20 Node and V8 need.
+#
+# Both spellings of the standard flag work for cl.exe; only /std: works for clang-cl
+# (in clang-cl mode -std= is ignored without complaint).

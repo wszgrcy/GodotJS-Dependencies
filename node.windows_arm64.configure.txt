@@ -1,10 +1,11 @@
 # ./configure arguments for Node.js on Windows arm64.
 # See node.linux_x86_64.configure.txt for what the shared options do.
 #
-# Run configure from the "VS 2022 ARM64 Native Tools Command Prompt" (the job
-# calls the vcvars script for the amd64_arm64 host/target pair). Node's own
-# docs treat Windows/arm64 as supported, but this is the least exercised
-# combination here; see docs/node-26.md.
+# Run configure from the "VS 2022 ARM64 Native Tools Command Prompt" (on an x64
+# machine that is vcvarsall's amd64_arm64 pair). No CI job builds this file today:
+# the matrix note in .github/workflows/build_node.yml explains why cross-building
+# arm64 Windows from an x64 runner is left out, and this file is the recipe for the
+# native arm64 runner that entry waits for.
 
 --ninja
 --dest-cpu=arm64
@@ -26,3 +27,18 @@
 # written here: the CI job reads `clang-cl --version` - the same thing Node's own
 # vcbuild.bat does - and appends --clang-cl=<version> to the arguments. Building by
 # hand on Windows means adding that option yourself, with the version you have.
+#
+# --clang-cl only records which toolchain the build is meant for; it does not change
+# the compiler ninja runs. gyp's ninja generator looks cl.exe up through the Visual
+# Studio environment by itself. Two more things are needed to really compile with
+# clang-cl, and they are described in node.windows_x86_64.configure.txt: handing gyp
+# the compiler path (-Dclang_cl=<path>, which patches/godotjs-node-clang-cl-ninja.patch
+# feeds to make_global_settings) and exporting CXXFLAGS=/std:c++20, because Node asks
+# for the standard through msvs_settings' LanguageStandard and gyp marks that as
+# MSBuild-only, so ninja drops it and the compiler falls back to its own default.
+#
+# The job applies both when the runner's architecture matches the target, which is the
+# case on a native arm64 runner. It does not when the two differ: clang-cl on an x64
+# host also needs --target=aarch64-windows-msvc, which gyp's clang-cl hook cannot pass
+# (it only appends -m32/-m64). Building this file by hand on an x64 machine therefore
+# means either running on an arm64 machine or adding that flag to CXXFLAGS yourself.

@@ -1,0 +1,50 @@
+Teach node.gyp to hand clang-cl to the ninja generator (our own change, not upstream)
+
+Why this patch exists: since Node 24 the Windows build is supposed to use clang-cl
+(BUILDING.md: "As of Node.js 24.0.0, ClangCL is required to compile on Windows"), but
+`./configure --clang-cl=<version>` only records the toolchain in the generated config -
+it does not change which compiler ninja runs. gyp's ninja generator looks up cl.exe
+through the Visual Studio environment and keeps using it, while the flags Node puts on
+the command line are chosen by the `clang=1` variable the same option sets. The result
+is a build that asks for clang-style settings and compiles with MSVC, and loses the C++
+standard completely (see docs/node-26.md).
+
+gyp has one supported way to pick another compiler on Windows: a `make_global_settings`
+entry whose CC path ends in "clang-cl" (see
+tools/gyp/pylib/gyp/generator/ninja.py: "If we have selected clang-cl, use that
+instead."). Node has no make_global_settings anywhere, so this patch adds one, driven
+by a `clang_cl` variable that stays empty unless the caller passes -Dclang_cl=<path>.
+Node's ./configure forwards its leftover arguments to gyp, so the CI job passes
+-Dclang_cl=/path/to/clang-cl. The condition keeps every other platform untouched.
+
+Verified on Linux by generating ninja files with the Windows flavour:
+
+    cl_x64 = /path/to/clang-cl -m64
+    cl_x86 = /path/to/clang-cl -m32
+
+--- a/node.gyp
++++ b/node.gyp
+@@ -1,5 +1,6 @@
+ {
+   'variables': {
++    'clang_cl%': '',
+     'v8_use_siphash%': 0,
+     'v8_trace_maps%': 0,
+     'v8_enable_pointer_compression%': 0,
+@@ -1768,6 +1769,16 @@
+   ], # end targets
+ 
+   'conditions': [
++    # gyp's ninja generator finds cl.exe through the Visual Studio environment and
++    # has no other knob for choosing a different compiler. It does honour one thing:
++    # a make_global_settings CC whose path ends with "clang-cl" makes it use that
++    # compiler for every architecture (adding -m64/-m32). Node's ./configure passes
++    # its leftover arguments on to gyp, so -Dclang_cl=<path to clang-cl> gets here.
++    ['OS=="win" and clang_cl!=""', {
++      'make_global_settings': [
++        ['CC', '<(clang_cl)'],
++      ],
++    }],
+     ['OS=="win" and node_shared=="true"', {
+      'targets': [
+        {

@@ -289,9 +289,8 @@ apply_build_patch() {
     echo "prepare_node_build: $label is already in this Node source"
   elif [ "$policy" = always ] || [ "$cross_build" = 1 ]; then
     echo "prepare_node_build: $label fits neither forward nor in reverse." >&2
-    echo "  This is a cross build ($host_os/$host_cpu -> ${dest_os:-same os}/${dest_cpu:-same cpu})," >&2
-    echo "  so without this fix ninja stops with 'multiple rules generate ...'. Either" >&2
-    echo "  this Node version carries it in a changed form, or $patch needs updating." >&2
+    echo "  Either this Node version carries it in a changed form, or $patch needs" >&2
+    echo "  updating (host $host_os/$host_cpu -> ${dest_os:-same os}/${dest_cpu:-same cpu})." >&2
     rm -f "$plain"
     exit 1
   else
@@ -309,6 +308,8 @@ apply_build_patch "$SCRIPT_DIR/patches/node-66804-single-producer.patch" \
                   "nodejs/node#66804 (single producer for shared generated files)" cross
 apply_build_patch "$SCRIPT_DIR/patches/node-66823-rust-host-target.patch" \
                   "nodejs/node#66823 (per-toolset Rust archives for Temporal cross builds)" cross
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-node-clang-cl-ninja.patch" \
+                  "our clang_cl hook that lets ninja use clang-cl on Windows" always
 
 # --- MSBuild's $(Platform) cannot survive into a ninja file ---------------------
 # deps/crates/crates.gyp builds the Rust side of Temporal. On Windows it names the
@@ -415,6 +416,26 @@ case "${NODE_TEMPORAL:-on}" in
     done
 
     cargo_line="$("$cargo_bin" --version 2>/dev/null | head -1 || true)"
+    # Windows is the one platform Node's own fix cannot serve. The per-toolset output
+    # directories node-66823-rust-host-target.patch adds are skipped for the Windows
+    # flavour, and the Windows branch of deps/crates/crates.gyp names its archive
+    # after <(target_arch) - the same name in the host and the target toolset - so
+    # ninja refuses before compiling anything, with
+    #   multiple rules generate gen/arm64/release/node_crates.lib
+    # Saying it here costs seconds instead of a configure run. Building Windows on a
+    # Windows machine of the same architecture has no split toolset and so no collision.
+    if [ "$dest_os" = win ] && [ -n "$dest_cpu" ] && [ "$dest_cpu" != "$host_cpu" ]; then
+      echo "prepare_node_build: Temporal cannot be built for a Windows cross build"
+      echo "  ($host_cpu machine building --dest-cpu=$dest_cpu)." >&2
+      echo "  deps/crates/crates.gyp names the Rust archive after the target"
+      echo "  architecture, which is the same path for the host and the target toolset,"
+      echo "  so ninja stops with 'multiple rules generate ... node_crates.lib'."
+      echo "  The fix this script carries from Node skips Windows on purpose."
+      echo "  Either build on a Windows machine of the target architecture, or set"
+      echo "  NODE_TEMPORAL=off: the manifest and the bundle check then record and"
+      echo "  enforce that this bundle has no Temporal API."
+      exit 1
+    fi
     if [ "$cross_build" = 1 ]; then
       if [ -z "${CARGO_BUILD_TARGET:-}" ]; then
         echo "prepare_node_build: this is a cross build, so configure needs" >&2
@@ -436,6 +457,7 @@ case "${NODE_TEMPORAL:-on}" in
     else
       echo "prepare_node_build: Temporal on, $cargo_line"
     fi
+
     ;;
   off)
     if grep -qE '^[[:space:]]*--v8-enable-temporal-support' "$ARGS_FILE"; then

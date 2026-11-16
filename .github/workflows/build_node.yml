@@ -79,11 +79,21 @@ jobs:
             {"platform": "macos", "arch": "x86_64", "runner": "macos-latest",
              "cargo_target": "x86_64-apple-darwin"},
             {"platform": "windows", "arch": "x86_64", "runner": "windows-2022"},
-            # Cross build: windows-2022 is x64, so arm64 Windows splits the toolset
-            # and depends on the fixes prepare_node_build.sh carries (section 10.1).
-            # windows-11-arm is the native alternative once this target is next to it.
-            {"platform": "windows", "arch": "arm64", "runner": "windows-2022",
-             "cargo_target": "aarch64-pc-windows-msvc"},
+            # arm64 Windows is not in the matrix, because building it from this x64
+            # runner needs two things that no supported path provides:
+            #   - the compiler: gyp's clang-cl hook only adds -m64/-m32, and clang-cl
+            #     on an x64 host cannot produce arm64 objects without also being given
+            #     --target=aarch64-windows-msvc. Upstream does that inside MSBuild's
+            #     ClangCL toolset (vcbuild -ClangCL), which the ninja path cannot reach.
+            #   - Temporal: the Rust archive collision of a split toolset on Windows
+            #     (gen/arm64/release/node_crates.lib produced twice). Node's own fix
+            #     (patches/node-66823-rust-host-target.patch) skips Windows on purpose,
+            #     and the Windows branch of deps/crates/crates.gyp routes cargo through
+            #     cargo_build.py <(target_arch), which is the same name in both toolsets.
+            # On a native arm64 Windows runner neither problem exists (no toolset split,
+            # clang-cl targets its own arch), so add the entry back there:
+            #   {"platform": "windows", "arch": "arm64", "runner": "<native arm64>"}
+            # The argument file node.windows_arm64.configure.txt is kept as the recipe.
             # Cross builds: the host machine is the same Linux x86_64 runner for
             # all three, the target differs. Host tools (mksnapshot, the JS snapshot
             # blob) are still built with the host compiler, which is what makes
@@ -251,6 +261,46 @@ jobs:
               export PATH="$BASH_DIR:$PATH"
               "$BASH_DIR/bash" --version | head -1
               echo "later steps resolve bash to: $(command -v bash)"
+
+              # A macOS arch that is not the runner's is a cross build, and the compiler
+              # has to be told which architecture to emit. gyp deliberately leaves -arch
+              # out of the flags when it is cross-compiling (xcode_emulation.GetLdflags
+              # skips it under `if not CrossCompileRequested()`), expecting the toolchain
+              # to carry it, so without this the compile lines name no architecture at
+              # all: the x86_64 build then compiles deps/zlib's SSE2 file for arm64 and
+              # emmintrin.h stops it with "This header is only meant to be used on x86
+              # and x64 architecture". Wrappers are the only way in, because gyp takes
+              # the target compiler as one program path (CC_target), not as a path plus
+              # flags - the same reason the iOS entry writes wrappers.
+              host_arch="$(uname -m)"
+              [ "$host_arch" = aarch64 ] && host_arch=arm64
+              if [ "$NODE_ARCH" != "$host_arch" ]; then
+                xc_bin="$RUNNER_TEMP/node-mac-bin"
+                mkdir -p "$xc_bin"
+                printf '#!/bin/sh\nexec xcrun --sdk macosx clang -arch %s "$@"\n' "$NODE_ARCH" > "$xc_bin/cc"
+                printf '#!/bin/sh\nexec xcrun --sdk macosx clang++ -arch %s "$@"\n' "$NODE_ARCH" > "$xc_bin/cxx"
+                chmod +x "$xc_bin"/*
+                {
+                  echo "CC_target=$xc_bin/cc"
+                  echo "CXX_target=$xc_bin/cxx"
+                  # The bundle check compiles its probe with the target compiler, so the
+                  # probe comes out as $NODE_ARCH like everything else in the bundle.
+                  echo "NODE_VERIFY_CXX=$xc_bin/cxx"
+                } >> "$GITHUB_ENV"
+                echo "cross build $host_arch -> $NODE_ARCH: $(cat "$xc_bin/cxx")"
+
+                # Running the probe needs Rosetta on an arm64 runner. Check now rather
+                # than after a 30-minute build: without it the check stops at the link,
+                # which still proves the archives are complete and in the order link.txt
+                # gives them.
+                if /usr/bin/arch -"$NODE_ARCH" /usr/bin/true 2>/dev/null; then
+                  echo "the runner can run $NODE_ARCH binaries, the bundle check will run them"
+                else
+                  echo "NODE_VERIFY_LINK_ONLY=1" >> "$GITHUB_ENV"
+                  echo "the runner cannot run $NODE_ARCH binaries (no Rosetta):"
+                  echo "  the bundle check will stop after the link"
+                fi
+              fi
               ;;
             windows)
               # From Node 24 on, Windows is built with clang-cl, which is an
@@ -280,6 +330,51 @@ jobs:
                   exit 1
                   ;;
               esac
+
+              # The version alone does not make ninja compile with clang-cl.
+              # ./configure --clang-cl records the toolchain in the generated config;
+              # choosing the compiler is gyp's job, and its ninja generator looks cl.exe
+              # up through the Visual Studio environment. gyp only accepts a different
+              # compiler as an absolute path in a make_global_settings CC entry, which
+              # is what the clang_cl hook under patches/ feeds it, so the path is
+              # recorded here and added to the configure arguments in the Build step.
+              # clang-cl can only be handed to gyp when the runner builds for its own
+              # architecture. A cross build would additionally need
+              # --target=aarch64-windows-msvc, and gyp's clang-cl hook only appends
+              # -m32/-m64, so a cross entry stays on cl.exe (and Node 24+ does not
+              # support cl.exe at all) - see the removal note in the matrix.
+              win_host_arch="$(uname -m)"
+              [ "$win_host_arch" = aarch64 ] && win_host_arch=arm64
+              if [ "$NODE_ARCH" = "$win_host_arch" ]; then
+                clang_cl_path="$(command -v clang-cl)"
+                # ninja needs the Windows spelling, and Git Bash may report either one.
+                if command -v cygpath >/dev/null 2>&1; then
+                  clang_cl_path="$(cygpath -w "$clang_cl_path")"
+                fi
+                case "$(printf '%s' "$clang_cl_path" | tr '[:upper:]' '[:lower:]')" in
+                  *clang-cl.exe) clang_cl_path="${clang_cl_path%????}" ;;
+                esac
+                # gyp decides "is this clang-cl?" by that suffix, so a value that does
+                # not end in clang-cl leaves the build on cl.exe silently. A space in the
+                # path is fine (LLVM installs to C:\Program Files\LLVM\bin): gyp quotes
+                # the value the same way it quotes the cl.exe path it finds itself.
+                case "$clang_cl_path" in
+                  *clang-cl) ;;
+                  *)
+                    echo "clang-cl was found at a value gyp will not accept:"
+                    echo "  $clang_cl_path"
+                    echo "  it has to end in clang-cl, otherwise gyp keeps using cl.exe"
+                    echo "  and says nothing about it."
+                    exit 1
+                    ;;
+                esac
+                echo "NODE_CLANG_CL_PATH=$clang_cl_path" >> "$GITHUB_ENV"
+                echo "ninja will compile with: $clang_cl_path"
+              else
+                echo "arch $NODE_ARCH is not the runner's arch ($win_host_arch): clang-cl"
+                echo "  would also need --target=aarch64-windows-msvc, which gyp cannot be"
+                echo "  given, so ninja keeps cl.exe."
+              fi
 
               # gyp's ninja generator works out which Visual Studio to use by reading
               # the registry, and on a runner that answer can come back empty even
@@ -484,6 +579,29 @@ jobs:
           # machine, not to a tracked file, so it is added here.
           if [ -n "${NODE_CLANG_CL_VERSION:-}" ]; then
             printf -- '--clang-cl=%s\n' "$NODE_CLANG_CL_VERSION" >> args.txt
+          fi
+
+          # Windows only, and only for x86_64 (see the toolchain step): the absolute
+          # path that makes ninja use clang-cl instead of cl.exe. Leftover ./configure
+          # arguments are passed to gyp, so this arrives as a gyp variable.
+          if [ -n "${NODE_CLANG_CL_PATH:-}" ]; then
+            printf -- '-Dclang_cl=%s\n' "$NODE_CLANG_CL_PATH" >> args.txt
+          fi
+
+          if [ "$NODE_PLATFORM" = windows ]; then
+            # Neither compiler gets a C++ standard from Node's build under ninja:
+            # common.gypi puts it in msvs_settings' LanguageStandard when clang-cl is
+            # requested, and gyp marks that property MSBuild-only, so the ninja
+            # generator drops it. The compile line then carries no standard at all and
+            # the compiler's own default decides: cl.exe is C++14, which is what made
+            # ICU's headers fail to parse; clang-cl defaults to gnu++17, still short of
+            # the C++20 Node and V8 need. gyp's ninja generator reads CXXFLAGS (and
+            # CXXFLAGS_host for build-time tools) while writing the ninja files, which
+            # is where the flag belongs. Spelling matters: clang-cl ignores -std=c++20
+            # without complaining and honours /std:c++20.
+            export CXXFLAGS="/std:c++20"
+            export CXXFLAGS_host="/std:c++20"
+            echo "CXXFLAGS for gyp: $CXXFLAGS"
           fi
 
           # One argument per line, comments dropped. Same rule as the args files.

@@ -11,10 +11,9 @@
 #     <arch>             x86_64 | arm64 | ...
 #
 # Environment:
-#   NODE_LINK_LIST   file holding the tokens of the `node` target's link command,
-#                    one per line. The CI jobs build it with
-#                    `ninja -C out/Release -t commands node | tail -1 | tr ' ' '\n'`.
-#                    If it is not set, this script runs ninja itself.
+#   NODE_LINK_LIST   optional file with the tokens of the `node` target's link
+#                    command, one per line; used instead of running ninja. Either
+#                    way tools/parse_node_link.py does the reading.
 #   NODE_CONFIG_ARGS file holding the ./configure arguments the build used, so
 #                    they can be recorded in manifest.json.
 #
@@ -105,6 +104,7 @@ SYSTEM_FILE="$STAGING/.node-system"
 
 if [ -n "$LINK_LIST" ]; then
   python3 "$SCRIPT_DIR/tools/parse_node_link.py" --tokens "$LINK_LIST" \
+    --out-dir "$NODE_OUT" \
     --whole "$WHOLE_FILE" --plain "$PLAIN_FILE" --system "$SYSTEM_FILE"
 else
   python3 "$SCRIPT_DIR/tools/parse_node_link.py" --commands "$LINK_CMD_SRC" \

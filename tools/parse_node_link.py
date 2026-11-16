@@ -4,6 +4,7 @@
     parse_node_link.py --commands FILE --whole OUT --plain OUT --system OUT
                        [--out-dir DIR]
     parse_node_link.py --tokens FILE --whole OUT --plain OUT --system OUT
+                       [--out-dir DIR]
 
 `--commands` takes the output of `ninja -C <out> -t commands node` (several
 command lines, one per line) and uses the last line that looks like a link of the
@@ -21,8 +22,14 @@ Why the three linkers are handled separately: GNU ld takes a group
 /WHOLEARCHIVE:<archive> per archive and usually gets its arguments through a
 response file (@file), which is why response files are expanded here.
 
+`--out-dir` does two things: it is the directory response files are read from,
+and the build tree whose archive names are known. The second one matters because
+gyp writes the link line with paths relative to the build directory, so a macOS
+link says `-Wl,-force_load,libnode_base.a libuv.a` rather than a path, and only
+the build tree can tell those apart from a system library.
+
     python3 parse_node_link.py --selftest
-runs the three shapes against built-in expectations.
+runs those shapes against built-in expectations.
 """
 
 import argparse
@@ -68,15 +75,47 @@ def tokenize(text):
     return tokens
 
 
-def is_our_archive(token):
-    """An archive this build produced comes with a path; a toolchain library is a
-    bare name (ws2_32.lib, or -lws2_32 on Linux)."""
-    return (token.endswith('.a') or token.endswith('.lib')) and (
-        '/' in token or '\\' in token)
+def build_archive_index(out_dir):
+    """Names of every static archive under the build directory.
+
+    Used to tell an archive this build produced from a toolchain library when the
+    link line gives no directory: gyp rebases the link line against the build
+    directory, so a macOS link passes `libuv.a` next to `-L.` while a Windows link
+    passes `ws2_32.lib` from the SDK. The link line is still what decides which
+    archives belong to the bundle; this only answers "is this name ours?".
+    """
+    names = set()
+    if not out_dir:
+        return names
+    for root, _dirs, files in os.walk(out_dir):
+        for name in files:
+            if name.endswith('.a') or name.endswith('.lib'):
+                names.add(name)
+    return names
+
+
+def is_our_archive(token, archives=None):
+    """True for an archive this build produced.
+
+    A path always counts. A bare name counts when the build directory holds a file
+    with that name (see build_archive_index); without an index, a bare name is left
+    to the toolchain (ws2_32.lib, or -lws2_32).
+    """
+    token = unquote(token)
+    if not (token.endswith('.a') or token.endswith('.lib')):
+        return False
+    if '/' in token or '\\' in token:
+        return True
+    return bool(archives) and archive_name(token) in archives
 
 
 def archive_name(token):
     return token.replace('\\', '/').rsplit('/', 1)[-1]
+
+
+# ld64 spells per-archive force-loading as one token `-Wl,-force_load,<archive>`;
+# the archive part is everything after this prefix.
+FORCE_LOAD_PREFIX = '-Wl,-force_load,'
 
 
 def expand_response_files(tokens, out_dir):
@@ -107,9 +146,9 @@ def expand_response_files(tokens, out_dir):
     return expanded
 
 
-def parse_command_line(command, out_dir=None):
+def parse_command_line(command, out_dir=None, archives=None):
     tokens = expand_response_files(tokenize(command), out_dir)
-    return tokens, classify(tokens)
+    return tokens, classify(tokens, archives)
 
 
 def unquote(token):
@@ -121,7 +160,7 @@ def unquote(token):
     return token
 
 
-def classify(tokens):
+def classify(tokens, archives=None):
     whole, plain, system = [], [], []
     group_is_whole = False
     seen = set()
@@ -145,15 +184,15 @@ def classify(tokens):
         if token.startswith('/WHOLEARCHIVE:'):
             add(token.split(':', 1)[1], True)
             continue
-        if token.startswith('-Wl,-force_load,'):
-            add(token.split(',', 1)[1], True)
+        if token.startswith(FORCE_LOAD_PREFIX):
+            add(token[len(FORCE_LOAD_PREFIX):], True)
             continue
         if token == '-force_load':
             force_next = True
             continue
         if force_next:
             force_next = False
-            if is_our_archive(unquote(token)):
+            if is_our_archive(token, archives):
                 add(token, True)
                 continue
         if token == '-framework':
@@ -163,7 +202,7 @@ def classify(tokens):
             system.append('-framework ' + token)
             expect_framework = False
             continue
-        if is_our_archive(token):
+        if is_our_archive(token, archives):
             add(token, group_is_whole)
             continue
         if token.endswith('.lib'):
@@ -177,7 +216,7 @@ def classify(tokens):
     return whole, plain, sorted(set(system))
 
 
-def choose_command(lines, out_dir):
+def choose_command(lines, out_dir, archives=None):
     """Pick the line that actually links Node.
 
     `ninja -t commands` prints one command per build edge leading to `node`, so the
@@ -190,7 +229,7 @@ def choose_command(lines, out_dir):
         if not line.strip():
             continue
         tokens = expand_response_files(tokenize(line), out_dir)
-        whole, plain, system = classify(tokens)
+        whole, plain, system = classify(tokens, archives)
         count = len(whole) + len(plain)
         if count >= 3:
             return tokens, (whole, plain, system), line
@@ -207,7 +246,8 @@ def main(argv=None):
     parser.add_argument('--plain')
     parser.add_argument('--system')
     parser.add_argument('--out-dir', default=None,
-                        help='directory response files (@file) are relative to')
+                        help='build directory: where response files (@file) are read from '
+                             'and where the archive names this build produced are looked up')
     parser.add_argument('--selftest', action='store_true')
     args = parser.parse_args(argv)
 
@@ -216,18 +256,19 @@ def main(argv=None):
     if not ((args.commands or args.tokens) and args.whole and args.plain and args.system):
         parser.error('need --commands or --tokens, plus --whole/--plain/--system')
 
+    archives = build_archive_index(args.out_dir)
     if args.tokens:
         tokens = []
         with open(args.tokens, encoding='utf-8', errors='replace') as handle:
             for line in handle:
                 tokens.extend(tokenize(line))
         tokens = expand_response_files(tokens, args.out_dir)
-        result = classify(tokens)
+        result = classify(tokens, archives)
         used = ' '.join(tokens)[:200]
     else:
         with open(args.commands, encoding='utf-8', errors='replace') as handle:
             lines = handle.read().splitlines()
-        chosen = choose_command(lines, args.out_dir)
+        chosen = choose_command(lines, args.out_dir, archives)
         if chosen is None:
             sys.exit('parse_node_link: no command found in ' + args.commands)
         tokens, result, used = chosen
@@ -262,9 +303,10 @@ def main(argv=None):
 def selftest():
     failures = []
 
-    def expect(label, command, want_whole, want_plain, want_system, out_dir=None):
+    def expect(label, command, want_whole, want_plain, want_system, out_dir=None,
+               archives=None):
         tokens = expand_response_files(tokenize(command), out_dir)
-        whole, plain, system = classify(tokens)
+        whole, plain, system = classify(tokens, archives)
         if whole != want_whole:
             failures.append(f'{label}: whole is {whole}, want {want_whole}')
         if plain != want_plain:
@@ -296,6 +338,22 @@ def selftest():
            'clang++ -o node -force_load out/Release/libnode_base.a out/Release/libuv.a',
            ['libnode_base.a'], ['libuv.a'], [])
 
+    # What gyp actually emits on macOS: the link line is rebased against the build
+    # directory, so the archives arrive as bare names next to `-L.`, and so does the
+    # file named after -Wl,-force_load,. A bare libz.a from the SDK must stay a
+    # system library, which is what the build directory decides.
+    ours = {'libnode_base.a', 'libv8_base_without_compiler.a', 'libuv.a', 'libada.a',
+            'libnode_crates.a'}
+    expect('ld64 with build-directory names (what macOS produces)',
+           'clang++ -o node -L. -Wl,-force_load,libnode_base.a '
+           '-Wl,-force_load,libv8_base_without_compiler.a libuv.a gen/cargo/target/'
+           'aarch64-apple-darwin/release/libnode_crates.a libada.a libz.a -lz '
+           '-framework CoreFoundation',
+           ['libnode_base.a', 'libv8_base_without_compiler.a'],
+           ['libuv.a', 'libnode_crates.a', 'libada.a'],
+           ['-framework CoreFoundation', '-lz'],
+           archives=ours)
+
     with tempfile.TemporaryDirectory() as work:
         rsp = os.path.join(work, 'obj', 'node.node.rsp')
         os.makedirs(os.path.dirname(rsp))
@@ -315,7 +373,8 @@ def selftest():
             print('FAIL ' + line)
         print(f'parse_node_link --selftest: {len(failures)} problem(s)')
         return 1
-    print('parse_node_link --selftest: PASS (GNU ld, ld64, ld64 two-token, MSVC + rsp)')
+    print('parse_node_link --selftest: PASS (GNU ld, ld64, ld64 two-token, '
+          'ld64 bare names, MSVC + rsp)')
     return 0
 
 
