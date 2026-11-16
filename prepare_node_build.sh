@@ -329,6 +329,33 @@ apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-clang-cl.patch" \
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-rsp-path-arg.patch" \
                   "our gyp fix that keeps the name= part of path arguments on Windows" always
 
+# --- Windows: torque cannot be handed backslash-separated paths ------------------
+# On Windows gyp writes an action's whole command line into a .rsp file, and while
+# doing that it rewrites every argument that looks like a path with
+# os.path.normpath, so torque is given "src\objects\torque-defined-classes.tq"
+# where the build file said "src/objects/torque-defined-classes.tq".
+#
+# torque identifies source files by those strings and compares them, and two of the
+# comparisons are written into torque's own source: the file every non-exported
+# Torque class is attributed to, and the "test/" prefix (deps/v8/src/torque/
+# types.cc, ClassType::AttributedToFile). The backslash spelling matches neither,
+# so the definitions for the non-exported classes are attributed nowhere and
+# gen/torque-generated/src/objects/torque-defined-classes-tq.inc is left at 0 bytes
+# while torque reports success. Everything that includes that header then fails,
+# half an hour later, with "incomplete type" errors about exactly those classes.
+#
+# Node's own Windows build does not hit this because it uses the MSBuild generator,
+# whose action command lines never go through that rewriting; --ninja on Windows is
+# the combination that does.
+#
+# The fix canonicalizes separators at the one place source paths are registered.
+# Measured on 26.13.1 (linux x86_64): without the patch, torque given backslash
+# spellings cannot even open its inputs; with it, both spellings produce the same
+# attribution file the build produces (62651 bytes, 1283 lines, 42 class
+# definitions), so normal builds are byte-for-byte unaffected.
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-torque-path-separator.patch" \
+                  "our torque fix for backslash-separated source paths" always
+
 # --- MSBuild's $(Platform) cannot survive into a ninja file ---------------------
 # deps/crates/crates.gyp builds the Rust side of Temporal. On Windows it names the
 # output directory and passes the platform to deps/crates/cargo_build.py with

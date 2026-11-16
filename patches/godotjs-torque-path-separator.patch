@@ -1,0 +1,20 @@
+--- a/deps/v8/src/torque/source-positions.cc
++++ b/deps/v8/src/torque/source-positions.cc
+@@ -39,6 +39,17 @@
+ 
+ // static
+ SourceId SourceFileMap::AddSource(std::string path) {
++  // Sources are found again by comparing these strings, and two of those
++  // comparisons are against a path written into this source file: the file that
++  // non-exported classes are attributed to, and the "test/" prefix. A build
++  // system that hands over backslash-separated paths would register the file
++  // under a spelling none of them can match, and the content that should go
++  // into that file is then silently dropped. Keep one spelling internally.
++  if (!StringStartsWith(path, "file://")) {
++    for (char& c : path) {
++      if (c == '\\') c = '/';
++    }
++  }
+   Get().sources_.push_back(std::move(path));
+   return SourceId(static_cast<int>(Get().sources_.size()) - 1);
+ }

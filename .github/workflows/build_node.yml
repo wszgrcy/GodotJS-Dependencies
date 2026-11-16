@@ -637,16 +637,17 @@ jobs:
           # Torque writes the headers V8's own headers depend on, as one build step
           # among thousands. Two things happen here:
           #
-          #   * those files are generated on their own first. On Windows the build
-          #     failed with 13 "incomplete type" errors naming exactly the classes
-          #     that only torque-defined-classes-tq.inc defines, and the file was
-          #     still empty when the generator had finished, so generating it here
-          #     also removes any chance of a compile reading it too early;
-          #   * each generated file's size is checked here, so a generator that
-          #     writes nothing fails in about a minute and prints the command that
-          #     writes the file, how long that command line is, and what the
-          #     generator did write - instead of turning into a confusing compiler
-          #     error half an hour later.
+          #   * those files are generated on their own first and each one's size is
+          #     checked, so a generator that writes nothing fails in about a minute
+          #     and prints the command that writes the file, how long that command
+          #     line is, and what the generator did write. On Windows this caught a
+          #     generator that reported success while leaving
+          #     src/objects/torque-defined-classes-tq.inc at 0 bytes, which turned
+          #     into 13 "incomplete type" errors half an hour later; why that
+          #     happens is written up in prepare_node_build.sh and it is fixed by
+          #     patches/godotjs-torque-path-separator.patch.
+          #   * generating them here also means no compile can read one while torque
+          #     still has it open.
           # The expected line counts are what a complete build produces; only the
           # order of magnitude matters, so half of that is the floor.
           set -o pipefail
