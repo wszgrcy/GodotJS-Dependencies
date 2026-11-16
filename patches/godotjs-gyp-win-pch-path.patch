@@ -1,10 +1,11 @@
 Spell the precompiled header's path the way ninja compiles
 
 Node's Windows build uses a precompiled header, tools/msvs/pch/node_pch.h. gyp turns
-that setting into the /Yu, /FI and /Yc compiler flags and passes the path on
-verbatim, so the value is only correct relative to whatever directory the compiler is
-started in. node.gypi names it from the repository root; ninja starts every compile
-from the build directory (out/Release), so the flag names nothing and clang-cl stops:
+that setting into the /Yu, /FI, /Fp and /Yc compiler flags and passes the paths on
+verbatim, so each value is only correct relative to whatever directory the compiler
+is started in. node.gypi names the header from the repository root; ninja starts every
+compile from the build directory (out/Release), so the flag names nothing and
+clang-cl stops with:
 
     fatal error: 'tools/msvs/pch/node_pch.h' required for precompiled header not found
 
@@ -14,6 +15,20 @@ problem by accident: tools/v8_gypfiles/v8.gyp spells its header with a leading
 "../../" (its V8_ROOT variable is "../../deps/v8"), which is a build-directory path,
 so V8's precompiled header already worked under ninja. This fix leaves such values
 alone.
+
+Fixing only /Yu, /FI and /Fp is not enough, and the second error is worth recording:
+/Yc - the flag that says "create the precompiled header from this header" - is
+appended later, inside msvs_emulation.GetFlagsModifications, so it has to be
+translated at that call site too. With /Yu rewritten and /Yc not, clang-cl sees the
+two naming different files and drops both:
+
+    warning: support for '/Yc' and '/Yu' with different filenames not implemented
+             yet; flags ignored        [-Wclang-cl-pch]
+    warning: argument unused during compilation: '/Fpnode_base.node_pch.h.pch'
+
+and every later compile of the target then fails with
+"unable to read PCH file node_base.node_pch.h.pch: 'no such file or directory'",
+because nothing ever wrote it.
 
 node.gypi is deliberately not edited: the same string is handed to cl.exe by the
 MSBuild generator that Node's own vcbuild uses, and changing it there could only be
@@ -80,3 +95,22 @@ introduced the difference is where the fix goes.
              extra_defines = self.msvs_settings.GetComputedDefines(config_name)
              # See comment at cc_command for why there's two .pdb files.
              pdbpath_c = pdbpath_cc = self.msvs_settings.GetCompilerPdbName(
+@@ -1253,6 +1293,18 @@
+                     cflags_cc,
+                     self.ExpandSpecial,
+                 )
++                # The /Yc that names the header to create the precompiled header
++                # from is added inside GetFlagsModifications, from the value in the
++                # gyp file, so it is translated here. clang-cl refuses a command
++                # whose /Yc and /Yu name different files ("support for '/Yc' and
++                # '/Yu' with different filenames not implemented yet; flags
++                # ignored"), and then no .pch is written at all.
++                variables = [
++                    (name, self.PchFlagsRelativeToBuildDir(value))
++                    if isinstance(value, list)
++                    else (name, value)
++                    for name, value in variables
++                ]
+             ninja_file.build(
+                 output,
+                 command,
