@@ -34,6 +34,7 @@ runs those shapes against built-in expectations.
 
 import argparse
 import os
+import re
 import sys
 import tempfile
 
@@ -118,31 +119,62 @@ def archive_name(token):
 FORCE_LOAD_PREFIX = '-Wl,-force_load,'
 
 
+# A response file named inside a longer string, as it appears when the link command
+# is wrapped in one quoted argument.
+RSP_INSIDE_TEXT = re.compile(r'@[^\s"]+\.rsp')
+
+
+def response_file_tokens(path, out_dir):
+    """The tokens held by a response file, or None when it cannot be read."""
+    if out_dir and not os.path.isabs(path):
+        path = os.path.join(out_dir, path.replace('\\', os.sep))
+    try:
+        with open(path, encoding='utf-8', errors='replace') as handle:
+            content = handle.read()
+    except OSError:
+        return None
+    tokens = []
+    # Line by line: a response file may hold several lines, and a quote pairing
+    # must not leak from one line into the next.
+    for line in content.splitlines():
+        tokens.extend(tokenize(line))
+    return tokens
+
+
 def expand_response_files(tokens, out_dir):
     """Replace `@file` with the tokens it holds.
 
     gyp's ninja generator writes a response file for the MSVC toolchain (the
     command line would be longer than the limit), so without this the archives are
     invisible on Windows: the command is just `link.exe @node.rsp`.
+
+    On Windows the `@file` is usually not a token of its own. The link rule runs
+    gyp-win-tool, which keeps the real link inside one quoted argument:
+
+      ... gyp-win-tool link-with-manifests environment.x64 True node.exe
+          "... link.exe /nologo /OUT:node.exe @node.exe.rsp" 1 mt.exe rc.exe ...
+
+    and the quoting makes that whole inner command a single token, so the response
+    file has to be looked for inside the token as well.
     """
     expanded = []
     for token in tokens:
-        if not token.startswith('@'):
+        if token.startswith('@'):
+            paths = [token[1:]]
+        elif '@' in token and '.rsp' in token:
+            paths = [match.group(0)[1:] for match in RSP_INSIDE_TEXT.finditer(token)]
+        else:
+            paths = []
+        if not paths:
             expanded.append(token)
             continue
-        path = token[1:]
-        if out_dir and not os.path.isabs(path):
-            path = os.path.join(out_dir, path.replace('\\', os.sep))
-        try:
-            with open(path, encoding='utf-8', errors='replace') as handle:
-                content = handle.read()
-        except OSError:
-            expanded.append(token)
-            continue
-        # Line by line: a response file may hold several lines, and a quote pairing
-        # must not leak from one line into the next.
-        for line in content.splitlines():
-            expanded.extend(tokenize(line))
+        for path in paths:
+            content = response_file_tokens(path, out_dir)
+            if content is None:
+                # Left as a token: a caller who knows better can still see it there.
+                expanded.append('@' + path)
+            else:
+                expanded.extend(content)
     return expanded
 
 
@@ -167,12 +199,32 @@ def classify(tokens, archives=None):
     expect_framework = False
     force_next = False
 
+    # The archives named here have to be force-loaded wherever the marker sits. GNU
+    # ld marks a group, so it is handled by position below; MSVC's /WHOLEARCHIVE: and
+    # ld64's -force_load name one archive each, and gyp writes those flags at the
+    # end of the Windows link line - after the archives they name were already
+    # listed. Reading the names first is what keeps the Windows split right; taking
+    # them in command order instead leaves every archive in `plain`, and an embedder
+    # then links a Node without its builtins and snapshot data, quietly.
+    forced = set()
+    pending_force_load = False
+    for token in tokens:
+        if token.startswith('/WHOLEARCHIVE:'):
+            forced.add(archive_name(unquote(token.split(':', 1)[1])))
+        elif token.startswith(FORCE_LOAD_PREFIX):
+            forced.add(archive_name(unquote(token[len(FORCE_LOAD_PREFIX):])))
+        elif token == '-force_load':
+            pending_force_load = True
+        elif pending_force_load:
+            forced.add(archive_name(unquote(token)))
+            pending_force_load = False
+
     def add(token, force):
         name = archive_name(unquote(token))
         if name in seen:
             return
         seen.add(name)
-        (whole if force else plain).append(name)
+        (whole if (force or name in forced) else plain).append(name)
 
     for token in tokens:
         if token == '-Wl,--whole-archive':
@@ -354,6 +406,28 @@ def selftest():
            ['-framework CoreFoundation', '-lz'],
            archives=ours)
 
+    # The shape a Windows runner produces: ninja's own command line for the node
+    # target, with link.exe and its response file buried inside a quoted argument
+    # handed to gyp-win-tool. Read out of `ninja -t commands node` on a real
+    # Windows build directory, with the archives of the real link.
+    with tempfile.TemporaryDirectory() as work:
+        rsp = os.path.join(work, 'node.exe.rsp')
+        with open(rsp, 'w', encoding='utf-8') as handle:
+            handle.write('obj/libnode.lib\nobj/node_base.lib\n'
+                         'obj/deps/uv/libuv.lib\nobj/deps/openssl/openssl.lib\n'
+                         'Dbghelp.lib winmm.lib\n'
+                         '/WHOLEARCHIVE:lib/node_base.lib '
+                         '/WHOLEARCHIVE:lib/libuv.lib\n')
+        expect('MSVC through gyp-win-tool (what ninja on Windows produces)',
+               'python3 gyp-win-tool link-with-manifests environment.x64 True node.exe '
+               '"python3 gyp-win-tool link-wrapper environment.x64 False link.exe '
+               '/nologo /OUT:node.exe @node.exe.rsp" 1 mt.exe rc.exe '
+               'obj/node.node.exe.intermediate.manifest',
+               ['node_base.lib', 'libuv.lib'],
+               ['libnode.lib', 'openssl.lib'],
+               ['Dbghelp.lib', 'winmm.lib'],
+               out_dir=work)
+
     with tempfile.TemporaryDirectory() as work:
         rsp = os.path.join(work, 'obj', 'node.node.rsp')
         os.makedirs(os.path.dirname(rsp))
@@ -374,7 +448,7 @@ def selftest():
         print(f'parse_node_link --selftest: {len(failures)} problem(s)')
         return 1
     print('parse_node_link --selftest: PASS (GNU ld, ld64, ld64 two-token, '
-          'ld64 bare names, MSVC + rsp)')
+          'ld64 bare names, MSVC + rsp, MSVC through gyp-win-tool)')
     return 0
 
 
