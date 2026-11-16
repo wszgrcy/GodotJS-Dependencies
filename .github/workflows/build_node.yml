@@ -634,30 +634,61 @@ jobs:
           printf 'configure %s\n' "${NODE_ARGS[*]}"
           python3 ./configure "${NODE_ARGS[@]}"
 
+          # Torque writes the headers V8's own headers depend on, as one build step
+          # among thousands. Two things happen here:
+          #
+          #   * those files are generated on their own first, so no compile can read
+          #     one while torque still has it open. The Windows build failed with 13
+          #     "incomplete type" errors naming exactly the classes that only
+          #     torque-defined-classes-tq.inc defines (the other classes in the same
+          #     generated file were fine, because their definitions also come from
+          #     elsewhere), which is what reading that file before it is filled in
+          #     looks like;
+          #   * each generated file's size is printed, and a generator that produced
+          #     far too little fails here in about a minute instead of turning into a
+          #     confusing compiler error 30 minutes later.
+          # The expected line counts are what a complete build produces; only the
+          # order of magnitude matters, so half of that is the floor.
+          set -o pipefail
+          for torque_output in \
+            "gen/torque-generated/src/objects/torque-defined-classes-tq.inc 600" \
+            "gen/torque-generated/objects-body-descriptors-inl.inc 120" \
+            "gen/torque-generated/class-forward-declarations.h 180" \
+            "gen/torque-generated/instance-types.h 600"; do
+            set -- $torque_output
+            if ninja -C out/Release "$1"; then
+              torque_lines="$(grep -c '' "out/Release/$1")"
+              echo "generated $1: $torque_lines lines"
+              if [ "$torque_lines" -lt "$2" ]; then
+                echo "$1 has $torque_lines lines; a complete run writes about $2."
+                echo "command that writes it:"
+                (cd out/Release && ninja -t commands "$1" | tail -1)
+                exit 1
+              fi
+            else
+              # A cross build may not accept a generated file as a target on its own.
+              # The build below generates it anyway; only the ordering and the size
+              # check above are lost, so say so instead of failing the job here.
+              echo "note: $1 could not be generated on its own; the build does it as usual"
+            fi
+          done
+
           # Build, keeping the log so a failure can be described without running the
           # whole build again: on a Windows runner a rerun costs about half an hour.
           # The log lives next to the build, not in $RUNNER_TEMP: on the Windows
           # runner the GitHub variables hold backslash paths (D:\a\_temp), and a
           # backslash inside a bash double-quoted string is not a separator, so the
           # file could not be created at all and the report below printed nothing.
-          set -o pipefail
           ninja_log="$PWD/.ninja-build.log"
           if ninja -C out/Release node 2>&1 | tee "$ninja_log"; then
             :
           else
-            # Nothing in this report may cut the report short; the line that explains
-            # the failure is often the third one after it.
+            # Printed plainly rather than inside a ::group::, because a collapsed
+            # group hides exactly the lines that matter. Nothing in here may cut the
+            # report short, so errexit stays off for its duration.
             set +e
-            echo "::group::ninja failed - what the build left behind"
-            if [ -s "$ninja_log" ]; then
-              echo "--- last 60 lines of the build ---"
-              tail -60 "$ninja_log"
-            else
-              echo "nothing was captured in $ninja_log - ninja did not reach a compile"
-            fi
-            echo "--- compiler that was used ---"
-            grep -m1 -E '(clang-cl|cl)\.exe' "$ninja_log" || echo "(no compiler line in the log)"
-            echo "--- torque output an embedder header needs ---"
+            echo "=== build failed: the facts that decide what to do next ==="
+            echo "--- generator output an embedder header needs ---"
             tq=out/Release/gen/torque-generated/src/objects/torque-defined-classes-tq.inc
             if [ -f "$tq" ]; then
               echo "$tq: $(grep -c '' "$tq") lines, $(grep -c '^class ' "$tq") class definitions"
@@ -665,6 +696,8 @@ jobs:
             else
               echo "$tq was not produced"
             fi
+            echo "--- compiler that was used ---"
+            grep -m1 -E '(clang-cl|cl)\.exe' "$ninja_log" || echo "(no compiler line in the log)"
             failed_line=$(grep -m1 '^FAILED:' "$ninja_log")
             # "FAILED: [code=1] <target> [more targets...]" - the first target is the
             # one worth looking at. Older ninja prints "FAILED: <target>".
@@ -676,6 +709,9 @@ jobs:
             if [ -n "$failed_target" ]; then
               echo "--- first failed target: $failed_target ---"
               (cd out/Release && ninja -t commands "$failed_target" 2>/dev/null | tail -1)
+              # What the failing compile waits for: if no torque stamp appears here,
+              # the compile is not ordered after the generator that writes its inputs.
+              (cd out/Release && ninja -t query "$failed_target" 2>/dev/null | head -25)
               # The response file ninja wrote holds the include path list that the
               # compiler actually saw; MSVC reads it through @file on the line.
               rsp_token=$(cd out/Release && ninja -t commands "$failed_target" 2>/dev/null \
@@ -685,7 +721,6 @@ jobs:
                 tr ' ' '\n' < "out/Release/$rsp_token" | grep -E '^/(I|external:I)' | head -30
               fi
             fi
-            echo "::endgroup::"
             exit 1
           fi
 
