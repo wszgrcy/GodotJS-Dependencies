@@ -845,7 +845,9 @@ jobs:
         # See patches/godotjs-openssl-win-asm-outputs-as-sources.patch.
         if: always()
         run: |
-          # Reporting only: nothing in here may end the job on its own.
+          # This step gates one thing: whether the nasm-built objects ended up inside
+          # openssl.lib. When the build did not get far enough to answer that, it
+          # reports and passes - there is nothing to gate on yet.
           set +e
           [ "$NODE_PLATFORM" = windows ] || exit 0
           [ "$NODE_ARCH" = x86_64 ] || { echo "no nasm-built assembly for $NODE_ARCH"; exit 0; }
@@ -855,16 +857,33 @@ jobs:
             echo "$ossl was not produced; the build did not get that far"
             exit 0
           fi
+          # lib.exe writes its options with a leading slash (/NOLOGO, /LIST), and the
+          # bash on the Windows runners rewrites an argument that starts with / into a
+          # path under its own install directory, so lib.exe was asked to open
+          # "C:\Program Files\Git\NOLOGO". MSYS2_ARG_CONV_EXCL tells that bash to leave
+          # the arguments as written; other shells ignore the variable.
+          libexe=lib.exe
+          command -v lib.exe > /dev/null 2>&1 || libexe="${VCToolsInstallDir}bin/HostX64/x64/lib.exe"
           members="$PWD/.openssl-lib-members.txt"
-          lib /NOLOGO /LIST "$ossl" > "$members" 2>&1
-          if ! grep -q '\.obj' "$members"; then
-            lib.exe /NOLOGO /LIST "$ossl" > "$members" 2>&1
+          MSYS2_ARG_CONV_EXCL='*' "$libexe" /NOLOGO /LIST "$ossl" > "$members" 2>&1
+          listed="$(grep -c '\.obj' "$members" 2>/dev/null || true)"
+          if [ "${listed:-0}" = 0 ]; then
+            # Without a member list nothing below can be concluded, and a guard that
+            # quietly does nothing is worse than no guard: it reads as a pass.
+            echo "lib.exe produced no member list for $ossl; its output was:"
+            head -8 "$members"
+            exit 1
           fi
-          asm_members="$(grep -c '-x86_64\.obj' "$members" 2>/dev/null || true)"
-          echo "members in openssl.lib: $(grep -c '\.obj' "$members" 2>/dev/null), of which ${asm_members:-0} are assembled from .asm"
+          # The member pattern starts with a dash, so it goes after -e or grep reads it
+          # as its own options.
+          asm_members="$(grep -c -e '-x86_64\.obj' "$members" 2>/dev/null || true)"
+          echo "members in openssl.lib: ${listed}, of which ${asm_members:-0} carry the nasm"
+          echo "object naming (-x86_64.obj); the ones that must be present are named below"
           if [ "${asm_members:-0}" = 0 ]; then
-            echo "lib.exe could not list the archive; its output was:"
-            head -5 "$members"
+            echo "the archive has ${listed} members and none of them were assembled from"
+            echo ".asm, so anything linking openssl.lib is missing their symbols. Check"
+            echo "that patches/godotjs-openssl-win-asm-outputs-as-sources.patch applied"
+            echo "(the Build log says 'applied ... openssl' near the top)."
             exit 1
           fi
           missing=0
