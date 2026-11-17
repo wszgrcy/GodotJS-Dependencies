@@ -17,6 +17,15 @@ import pathlib
 import re
 import sys
 
+# The CI jobs run Python 3.12, where Path.read_text() has no newline argument; opening
+# the file keeps the line endings exactly as the build wrote them, which is what the
+# checks below depend on.
+
+
+def read_text(path):
+    with path.open(encoding="utf-8", errors="replace", newline="") as handle:
+        return handle.read()
+
 BUILD_RE = re.compile(r"^build [^:]+:")
 WHOLE_RE = re.compile(r"/WHOLEARCHIVE:([^\s$]+)", re.IGNORECASE)
 
@@ -60,12 +69,12 @@ def main(build_dir):
 
     outputs = set()
     for path in ninja_files:
-        outputs |= build_outputs(path.read_text(encoding="utf-8", errors="replace", newline=""))
+        outputs |= build_outputs(read_text(path))
 
     checked = 0
     offenders = []
     for path in ninja_files:
-        text = path.read_text(encoding="utf-8", errors="replace", newline="")
+        text = read_text(path)
         for _, line in ninja_blocks(text):
             for match in WHOLE_RE.finditer(line):
                 checked += 1
