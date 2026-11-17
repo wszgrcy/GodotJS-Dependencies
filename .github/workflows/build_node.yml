@@ -643,8 +643,11 @@ jobs:
           # make the generator produce matching spellings; this checks that it did, and
           # repairs and names anything that does not, so the log says which file and
           # which flag instead of leaving it to the compiler two thousand targets later.
+          # This step runs inside the node source directory, and the repository was
+          # checked out into ./Scripts next to it, so the script is reached the same way
+          # as ../Scripts/prepare_node_build.sh above.
           if [ "$NODE_PLATFORM" = windows ]; then
-            python3 "$GITHUB_WORKSPACE/tools/fix_windows_pch_flags.py" out/Release
+            python3 ../Scripts/tools/fix_windows_pch_flags.py out/Release
           fi
 
           # Torque writes the headers V8's own headers depend on, as one build step
