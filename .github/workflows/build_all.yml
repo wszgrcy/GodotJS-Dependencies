@@ -417,16 +417,30 @@ jobs:
           printf 'assets=%s\n' "${assets# }" >> "$GITHUB_OUTPUT"
 
       - name: Create Release and Upload Assets
+        # The tag may already exist: a Node platform publishes itself as soon as it
+        # finishes (see build_node.yml), and re-running this workflow for the same tag
+        # is the normal way to test it. So the release is edited in place and the files
+        # replace their own old copies by name - recreating the release would drop
+        # assets another job published into the same tag.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.bundle_tag }}"
+          notes="Bundles: ${{ steps.pack.outputs.assets }}"
           files=(staging/*.zip)
           if [ -f staging/SHA256SUMS.txt ]; then
             files+=(staging/SHA256SUMS.txt)
           fi
-          gh release create "${{ github.event.inputs.bundle_tag }}" \
-            "${files[@]}" \
-            --title "${{ github.event.inputs.bundle_tag }}" \
-            --notes "Bundles: ${{ steps.pack.outputs.assets }}" \
-            --repo ${{ github.repository }} \
-            --target ${{ github.sha }}
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --title "$tag" --notes "$notes"
+          else
+            gh release create "$tag" \
+              --title "$tag" \
+              --notes "$notes" \
+              --repo "${{ github.repository }}" \
+              --target "${{ github.sha }}"
+          fi
+          gh release view "$tag" > /dev/null
+          gh release upload "$tag" "${files[@]}" --clobber
+

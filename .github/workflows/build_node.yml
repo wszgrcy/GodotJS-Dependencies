@@ -28,6 +28,11 @@ on:
         type: string
         required: false
         default: ''
+      release_tag:
+        description: 'release each finished platform is published into (created if missing); empty = node-<version>'
+        type: string
+        required: false
+        default: ''
   workflow_call:
     inputs:
       node_version:
@@ -37,9 +42,15 @@ on:
         required: false
         type: string
         default: ''
+      release_tag:
+        required: false
+        type: string
+        default: ''
 
 permissions:
-  contents: read
+  # "Publish this platform's bundle" adds a release asset from inside a matrix job,
+  # which needs write access; nothing else here writes to the repository.
+  contents: write
 
 jobs:
   # The matrix is built here rather than written out on the job, because the
@@ -151,6 +162,9 @@ jobs:
       NODE_PLATFORM: ${{ matrix.entry.platform }}
       NODE_ARCH: ${{ matrix.entry.arch }}
       ARGS_FILE: node.${{ matrix.entry.platform }}_${{ matrix.entry.arch }}.configure.txt
+      # Where a finished platform publishes its bundle. Empty means node-<version>,
+      # computed in the step so the rule lives in one place.
+      RELEASE_TAG: ${{ inputs.release_tag }}
       # Bionic API level the NDK wrappers target. 28 matches the minimum the Godot
       # Android export templates use.
       NODE_ANDROID_API: ${{ vars.NODE_ANDROID_API || '28' }}
@@ -905,3 +919,69 @@ jobs:
           # Without this an empty staging/ uploads successfully, and the failure only
           # shows up where the bundle is consumed.
           if-no-files-found: error
+
+      - name: Publish this platform's bundle
+        # A platform publishes its own bundle as soon as its own build is done,
+        # instead of waiting for the whole matrix: a green Linux build is
+        # downloadable while Windows is still compiling, and a platform that fails
+        # later holds up nobody. The release is created by whoever arrives first and
+        # the others add their file to it. Names carry platform and architecture, so
+        # a job never touches what another one published, and re-running one
+        # platform replaces only its own file.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Both are needed below; say so here rather than failing inside the packaging.
+          command -v gh > /dev/null || { echo "gh is not on PATH on this runner" >&2; exit 1; }
+          command -v python3 > /dev/null || { echo "python3 is not on PATH on this runner" >&2; exit 1; }
+          tag="${RELEASE_TAG:-node-${NODE_VERSION}}"
+
+          # Exactly the layout build_all.yml uses when it publishes every platform at
+          # once, so whoever downloads the bundle can take either: node/include plus
+          # node/<platform>.<arch>.release/, zipped under the same file name.
+          shopt -s nullglob
+          platforms=(staging/node/*.release staging/node/*_release)
+          if [ "${#platforms[@]}" -ne 1 ]; then
+            echo "expected one platform directory in staging/node, found ${#platforms[@]}" >&2
+            printf '  %s\n' "${platforms[@]}" >&2
+            exit 1
+          fi
+          plat_arch="$(basename "${platforms[0]}")"
+          plat_arch="${plat_arch%.release}"
+          plat_arch="${plat_arch%_release}"
+          asset="node_${NODE_VERSION}_${plat_arch}.zip"
+          # make_archive appends ".zip" itself, so it gets the name without the suffix.
+          python3 -c 'import shutil, sys; shutil.make_archive(sys.argv[1][:-4], "zip", sys.argv[2], "node")' \
+            "$asset" staging
+          # A truncated or missing archive here would sit on the release page looking
+          # fine until someone tried to link against it.
+          [ -s "$asset" ] || { echo "$asset was not written" >&2; exit 1; }
+          # nodejs.org ships SHASUMS256.txt next to its tarballs for the same reason
+          # this does: these files are fetched over a network by whoever builds the
+          # engine. One file per platform, so publishing stays race-free.
+          sha256sum "$asset" > "$asset.sha256"
+          echo "$asset: $(du -h "$asset" | cut -f1)"
+
+          # Overwrite in place, never delete-and-recreate: this release page is shared
+          # by every platform in the matrix, so recreating it would erase the bundles
+          # the others already published. The description is refreshed and this
+          # platform's files replace their own old copies by name.
+          notes="Prebuilt Node ${NODE_VERSION} libraries for GodotJS. Each file is one platform, published by that platform's own build job as soon as it passed; a platform missing here is still building or failed."
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --title "$tag" --notes "$notes" --prerelease
+          else
+            # Two jobs can reach this in the same second, so losing the race to create
+            # is fine; what must not happen is uploading into a release that is not there.
+            gh release create "$tag" \
+                 --title "$tag" \
+                 --notes "$notes" \
+                 --target "${{ github.sha }}" \
+                 --repo "${{ github.repository }}" \
+                 --prerelease \
+              || true
+          fi
+          gh release view "$tag" > /dev/null
+          gh release upload "$tag" "$asset" "$asset.sha256" --clobber
+          echo "release $tag now carries:"
+          gh release view "$tag" --json assets --jq '.assets[].name'
