@@ -1,5 +1,6 @@
 name: GodotJS Dependencies (All)
-
+permissions:
+  contents: write
 on:
   workflow_dispatch:
     inputs:
