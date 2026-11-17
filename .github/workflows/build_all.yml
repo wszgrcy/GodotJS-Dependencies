@@ -363,7 +363,11 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends zip unzip
+          sudo apt-get install -y --no-install-recommends zip unzip python3-zstandard
+          # Same round trip as build_node.yml runs on every platform: it says in
+          # seconds whether this runner's python can compress an asset and read it
+          # back, instead of failing partway through the list below.
+          python3 -c 'import zstandard; d = zstandard.ZstdCompressor(level=15).compress(b"check" * 1000); assert zstandard.ZstdDecompressor().decompress(d) == b"check" * 1000; print("zstandard ok, libzstd", ".".join(map(str, zstandard.ZSTD_VERSION)))'
           echo "Downloaded artifacts layout:"
           ls -R staging || true
 
@@ -387,23 +391,37 @@ jobs:
           # Node gets one archive per platform instead of one bundle like V8: the
           # headers are shared, the libraries are not, and every platform's set is
           # far bigger than the whole V8 bundle. The file name carries the platform
-          # so an engine build only downloads what it links.
+          # so an engine build only downloads what it links. zstd rather than zip,
+          # because these are static archives full of symbol and debug records, and
+          # deflate leaves most of the possible saving on the table for that kind of
+          # data (on the Linux bundle: zip 88 MB, zstd level 15 66 MB).
           shopt -s nullglob
           for platform_dir in staging/node/*.release staging/node/*_release; do
             [ -d "$platform_dir" ] || continue
             name="$(basename "$platform_dir")"
             plat_arch="${name%_release}"
             plat_arch="${plat_arch%.release}"
-            asset="node_${{ github.event.inputs.node_version }}_${plat_arch}.zip"
-            (cd staging && zip -qr "$asset" node/include "node/$name")
+            asset="node_${{ github.event.inputs.node_version }}_${plat_arch}.tar.zst"
+            python3 Scripts/tools/zstd_pack.py pack --directory staging --name node \
+              --out "staging/$asset" --level 15
             echo "Created Node bundle: staging/$asset"
           done
 
           # nodejs.org publishes SHASUMS256.txt next to its tarballs for exactly the
           # reason that applies here: these archives get downloaded over a network by
-          # whoever builds the engine. The release page carries the same list.
-          if compgen -G "staging/*.zip" > /dev/null; then
-            ( cd staging && sha256sum *.zip > SHA256SUMS.txt )
+          # whoever builds the engine. The release page carries the same list. Bundles
+          # that a Node platform published for itself are not in this file - each of
+          # those has its own .sha256 beside it.
+          names=""
+          for pattern in "*.zip" "*.tar.zst"; do
+            for f in staging/$pattern; do
+              if [ -f "$f" ]; then
+                names="$names $(basename "$f")"
+              fi
+            done
+          done
+          if [ -n "$names" ]; then
+            ( cd staging && sha256sum $names > SHA256SUMS.txt )
             echo "staging/SHA256SUMS.txt:"
             cat staging/SHA256SUMS.txt
           fi
@@ -411,46 +429,40 @@ jobs:
           # The release page gets the list that was actually produced, which is the
           # quickest way to see which runtime and which platforms made it.
           assets=""
-          for archive in staging/*.zip; do
-            [ -f "$archive" ] || continue
-            assets="$assets $(basename "$archive")"
+          for pattern in "*.zip" "*.tar.zst"; do
+            for archive in staging/$pattern; do
+              [ -f "$archive" ] || continue
+              assets="$assets $(basename "$archive")"
+            done
           done
           printf 'assets=%s\n' "${assets# }" >> "$GITHUB_OUTPUT"
 
       - name: Create Release and Upload Assets
-        # The tag may already exist: a Node platform publishes itself as soon as it
-        # finishes (see build_node.yml), and re-running this workflow for the same tag
-        # is the normal way to test it. So the release is edited in place and the files
-        # replace their own old copies by name - recreating the release would drop
-        # assets another job published into the same tag.
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          tag="${{ github.event.inputs.bundle_tag }}"
-          notes="Bundles: ${{ steps.pack.outputs.assets }}"
-          files=(staging/*.zip)
-          if [ -f staging/SHA256SUMS.txt ]; then
-            files+=(staging/SHA256SUMS.txt)
-          fi
-          # gh picks the repository from the git checkout it is in, and this step runs
-          # from the job workspace, one level above the ./Scripts checkout, so it has
-          # to be told. Every call names it: an unqualified call fails in a way that
-          # reads like "this release does not exist" and then create reports the tag
-          # as already taken.
-          repo="${{ github.repository }}"
-          if gh release view "$tag" --repo "$repo" --json tagName > /dev/null 2> gh-view.err; then
-            gh release edit "$tag" --repo "$repo" --title "$tag" --notes "$notes"
-          else
-            sed 's/^/gh release view: /' gh-view.err
-            # Losing a race with a Node platform that published the same tag first is
-            # not a failure; editing what it created is the same result.
-            gh release create "$tag" \
-              --repo "$repo" \
-              --title "$tag" \
-              --notes "$notes" \
-              --target "${{ github.sha }}" \
-              || gh release edit "$tag" --repo "$repo" --title "$tag" --notes "$notes"
-          fi
-          gh release upload "$tag" --repo "$repo" "${files[@]}" --clobber
+        # softprops/action-gh-release rather than gh written out by hand, for the same
+        # reason build_node.yml uses it: it updates whatever release already exists for
+        # the tag - which is the usual case, because a Node platform publishes itself as
+        # soon as it finishes and because re-running this workflow for a tag it already
+        # made is how it gets tested - and it replaces these files by name without
+        # touching assets another job put on the same release. The hand-written version
+        # also had to tell gh which repository it meant, because this step's working
+        # directory is not a git checkout (the repository sits in ./Scripts).
+        #
+        # prerelease is deliberately left out: when the tag's release already exists and
+        # nothing is said about it, the action keeps whatever it was marked as.
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.inputs.bundle_tag }}
+          name: ${{ github.event.inputs.bundle_tag }}
+          target_commitish: ${{ github.sha }}
+          body: "Bundles: ${{ steps.pack.outputs.assets }}"
+          token: ${{ github.token }}
+          files: |
+            staging/*.zip
+            staging/*.tar.zst
+            staging/SHA256SUMS.txt
+          overwrite_files: true
+          # Which runtimes and platforms were asked for decides what is here, so an
+          # unmatched pattern is normal. The packaging step is what fails the run if it
+          # was asked to produce something and could not.
+          fail_on_unmatched_files: false
 

@@ -165,6 +165,11 @@ jobs:
       # Where a finished platform publishes its bundle. Empty means node-<version>,
       # computed in the step so the rule lives in one place.
       RELEASE_TAG: ${{ inputs.release_tag }}
+      # zstd level for the published bundle. 15 is already past the point where more
+      # levels pay back much - on the Linux bundle, zip gives 88 MB, level 15 gives
+      # 66 MB and level 19 gives 58 MB - while the time goes 8 s -> 30 s. Raise it to
+      # 19 here if the download size starts to matter more than the extra minute.
+      RELEASE_ZSTD_LEVEL: 15
       # Bionic API level the NDK wrappers target. 28 matches the minimum the Godot
       # Android export templates use.
       NODE_ANDROID_API: ${{ vars.NODE_ANDROID_API || '28' }}
@@ -180,6 +185,36 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Check that the release asset can be packed
+        # The published bundle is a .tar.zst, and the only thing that can produce it
+        # on every runner is the zstandard wheel - the Windows runners have no zstd
+        # command. This step installs it and runs a real pack/unpack round trip, so
+        # "the wheel is missing for this python", "the wheel will not import" and
+        # "the packing script is broken" are all answered in seconds instead of
+        # after a 40-minute build, when the asset is about to be published.
+        run: |
+          set -euo pipefail
+          # setup-python's interpreter is not a distro package, so the plain install
+          # is what works on the runners. The second try is only for a machine where
+          # python is distribution-managed (PEP 668), which is not the runner case but
+          # costs nothing to survive.
+          python3 -m pip install --quiet zstandard \
+            || python3 -m pip install --quiet --break-system-packages zstandard
+          python3 -c 'import zstandard; print("zstandard", zstandard.__version__, "| libzstd", ".".join(map(str, zstandard.ZSTD_VERSION)))'
+          sample="$PWD/.zstd-check"
+          rm -rf "$sample" "$sample.tar.zst"
+          mkdir -p "$sample/node/include"
+          # Compressible payload on purpose: the real thing is static archives full
+          # of symbol and debug records, not random bytes.
+          python3 -c 'import sys; open(sys.argv[1], "wb").write(b"node archive stand-in " * 400000)' \
+            "$sample/node/include/sample.bin"
+          python3 Scripts/tools/zstd_pack.py pack --directory "$sample" --name node \
+            --out "$sample.tar.zst" --level "$RELEASE_ZSTD_LEVEL"
+          python3 Scripts/tools/zstd_pack.py unpack --archive "$sample.tar.zst" --into "$sample/out"
+          cmp "$sample/node/include/sample.bin" "$sample/out/node/include/sample.bin"
+          rm -rf "$sample" "$sample.tar.zst"
+          echo "pack and unpack round-trip is good with level $RELEASE_ZSTD_LEVEL"
 
       - name: Developer environment for Visual Studio
         if: ${{ matrix.entry.platform == 'windows' }}
@@ -753,7 +788,7 @@ jobs:
           #   * the header install that packaging does, which reads config.gypi and
           #     is where an installer or option change shows up
           missing_tools=()
-          for tool in python3 find tr du awk sed grep tar gzip gh; do
+          for tool in python3 find tr du awk sed grep tar gzip; do
             command -v "$tool" > /dev/null 2>&1 || missing_tools+=("$tool")
           done
           if [ "${#missing_tools[@]}" -ne 0 ]; then
@@ -979,7 +1014,7 @@ jobs:
           # shows up where the bundle is consumed.
           if-no-files-found: error
 
-      - name: Publish this platform's bundle
+      - name: Prepare the release asset
         # A platform publishes its own bundle as soon as its own build is done,
         # instead of waiting for the whole matrix: a green Linux build is
         # downloadable while Windows is still compiling, and a platform that fails
@@ -987,18 +1022,20 @@ jobs:
         # the others add their file to it. Names carry platform and architecture, so
         # a job never touches what another one published, and re-running one
         # platform replaces only its own file.
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        #
+        # The archive is a .tar.zst rather than a .zip because these bundles are
+        # mostly static libraries: on the Linux bundle zip gave 88 MB and zstd level
+        # 15 gives 66 MB for the same 358 MB of files, at about the same speed. Take
+        # it apart with `tar --zstd -xf node_<version>_<platform>.<arch>.tar.zst`, or
+        # with `zstd -d` followed by `tar -xf`.
+        id: asset
         run: |
           set -euo pipefail
-          # Both are needed below; say so here rather than failing inside the packaging.
-          command -v gh > /dev/null || { echo "gh is not on PATH on this runner" >&2; exit 1; }
-          command -v python3 > /dev/null || { echo "python3 is not on PATH on this runner" >&2; exit 1; }
           tag="${RELEASE_TAG:-node-${NODE_VERSION}}"
 
-          # Exactly the layout build_all.yml uses when it publishes every platform at
-          # once, so whoever downloads the bundle can take either: node/include plus
-          # node/<platform>.<arch>.release/, zipped under the same file name.
+          # The inner layout is what build_all.yml has always published: node/include
+          # plus node/<platform>.<arch>.release/, so a consumer only has to change how
+          # it unpacks, not what it looks for afterwards.
           shopt -s nullglob
           platforms=(staging/node/*.release staging/node/*_release)
           if [ "${#platforms[@]}" -ne 1 ]; then
@@ -1009,10 +1046,9 @@ jobs:
           plat_arch="$(basename "${platforms[0]}")"
           plat_arch="${plat_arch%.release}"
           plat_arch="${plat_arch%_release}"
-          asset="node_${NODE_VERSION}_${plat_arch}.zip"
-          # make_archive appends ".zip" itself, so it gets the name without the suffix.
-          python3 -c 'import shutil, sys; shutil.make_archive(sys.argv[1][:-4], "zip", sys.argv[2], "node")' \
-            "$asset" staging
+          asset="node_${NODE_VERSION}_${plat_arch}.tar.zst"
+          python3 Scripts/tools/zstd_pack.py pack --directory staging --name node \
+            --out "$asset" --level "$RELEASE_ZSTD_LEVEL"
           # A truncated or missing archive here would sit on the release page looking
           # fine until someone tried to link against it.
           [ -s "$asset" ] || { echo "$asset was not written" >&2; exit 1; }
@@ -1025,36 +1061,37 @@ jobs:
           python3 -c 'import hashlib, sys; p = sys.argv[1]; h = hashlib.sha256(); f = open(p, "rb"); [h.update(b) for b in iter(lambda: f.read(1 << 20), b"")]; print(f"{h.hexdigest()}  {p}")' \
             "$asset" | tee "$asset.sha256"
           [ -s "$asset.sha256" ] || { echo "$asset.sha256 is empty" >&2; exit 1; }
-          echo "$asset: $(du -h "$asset" | cut -f1)"
+          echo "bundle on disk: $(du -sh staging/node | cut -f1); asset: $(du -h "$asset" | cut -f1)"
+          {
+            echo "tag=$tag"
+            echo "asset=$asset"
+          } >> "$GITHUB_OUTPUT"
 
-          # Overwrite in place, never delete-and-recreate: this release page is shared
-          # by every platform in the matrix, so recreating it would erase the bundles
-          # the others already published. The description is refreshed and this
-          # platform's files replace their own old copies by name.
-          notes="Prebuilt Node ${NODE_VERSION} libraries for GodotJS. Each file is one platform, published by that platform's own build job as soon as it passed; a platform missing here is still building or failed."
-          # gh decides which repository to talk to by looking at the git checkout it
-          # is standing in, and this step is not standing in one: the repository is
-          # checked out into ./Scripts while steps run from the job workspace above
-          # it. Every call therefore names the repository. Without this a call that
-          # could not work out the repository fails like "no such release", which is
-          # what sent the step down the create path against a tag that already existed.
-          repo="${{ github.repository }}"
-          if gh release view "$tag" --repo "$repo" --json tagName > /dev/null 2> gh-view.err; then
-            gh release edit "$tag" --repo "$repo" --title "$tag" --notes "$notes" --prerelease
-          else
-            # Keep the reason visible: last time this branch was taken the release did
-            # exist and the message explaining why was thrown away with the stderr.
-            sed 's/^/gh release view: /' gh-view.err
-            # Two jobs can reach this in the same second, so losing the race to create
-            # is not a failure: editing what the other one made is the same outcome.
-            gh release create "$tag" \
-                 --repo "$repo" \
-                 --title "$tag" \
-                 --notes "$notes" \
-                 --target "${{ github.sha }}" \
-                 --prerelease \
-              || gh release edit "$tag" --repo "$repo" --title "$tag" --notes "$notes" --prerelease
-          fi
-          gh release upload "$tag" --repo "$repo" "$asset" "$asset.sha256" --clobber
-          echo "release $tag now carries:"
-          gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name'
+      - name: Publish this platform's bundle
+        # softprops/action-gh-release instead of gh written out by hand: it makes the
+        # release for the tag when nobody has made one yet, updates the one that is
+        # already there when someone has (two matrix jobs finishing in the same second
+        # is normal), and replaces this platform's own files by name while leaving
+        # every other platform's file alone. The hand-written version asked gh which
+        # repository it was standing in - there is no git checkout in this step's
+        # working directory, the repository lives in ./Scripts - and read the answer
+        # as "that release does not exist".
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.asset.outputs.tag }}
+          name: ${{ steps.asset.outputs.tag }}
+          # Only used when the tag itself still has to be created.
+          target_commitish: ${{ github.sha }}
+          body: "Prebuilt Node ${{ env.NODE_VERSION }} libraries for GodotJS, packed with zstd. Each file is one platform, published by that platform's own build job as soon as it passed; a platform missing here is still building or failed. Beside each bundle is its .sha256."
+          # While these bundles are still being checked over; drop this line when they
+          # are what the engine build should pull.
+          prerelease: true
+          token: ${{ github.token }}
+          files: |
+            ${{ steps.asset.outputs.asset }}
+            ${{ steps.asset.outputs.asset }}.sha256
+          # The reruns that used to be needed to fix a botched publish are the normal
+          # way to test one platform, so replacing this platform's own file is wanted.
+          overwrite_files: true
+          # A bundle that is not on disk is a packaging failure, not an empty release.
+          fail_on_unmatched_files: true
