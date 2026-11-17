@@ -22,8 +22,9 @@ Why the three linkers are handled separately: GNU ld takes a group
 /WHOLEARCHIVE:<archive> per archive and usually gets its arguments through a
 response file (@file), which is why response files are expanded here.
 
-`--out-dir` does two things: it is the directory response files are read from,
-and the build tree whose archive names are known. The second one matters because
+`--out-dir` does three things: it is the directory response files are read from, the
+build tree whose archive names are known, and the ninja tree a deleted response file is
+rebuilt from. The second one matters because
 gyp writes the link line with paths relative to the build directory, so a macOS
 link says `-Wl,-force_load,libnode_base.a libuv.a` rather than a path, and only
 the build tree can tell those apart from a system library.
@@ -124,6 +125,139 @@ FORCE_LOAD_PREFIX = '-Wl,-force_load,'
 RSP_INSIDE_TEXT = re.compile(r'@[^\s"]+\.rsp')
 
 
+# ---------------------------------------------------------------------------
+# Response files ninja has already thrown away
+#
+# ninja writes a response file right before running an edge and deletes it when the
+# command finishes (measured with a two-line rule: the command sees the file, it is
+# gone afterwards). So on a built Windows tree `node.exe.rsp` does not exist when the
+# bundle is packaged, and the archives - which live only inside that file - would be
+# invisible here. What ninja wrote can be rebuilt from the ninja files: the rule says
+# `rspfile_content = $in_newline $libs $ldflags`, and the edge carries $libs and
+# $ldflags, so the text can be produced again without running the linker.
+# ---------------------------------------------------------------------------
+
+_NINJA_CACHE = {}
+
+
+def ninja_statements(path):
+    """The statements of a ninja file, with trailing-$ continuations joined.
+
+    ninja continues a statement with a single `$` at the end of the line (a literal
+    `$` is written `$$`), so a long `build` line or a multi-line `ldflags` value is
+    one statement spread over several lines.
+    """
+    with open(path, encoding='utf-8', errors='replace', newline='') as handle:
+        text = handle.read()
+    return re.sub(r'(?<!\$)\$\s*\r?\n[ \t]*', ' ', text).splitlines()
+
+
+def expand_ninja_vars(value, mapping):
+    """Expand `$name`, `${name}` and `$$` the way ninja does. Unknown names stay as written."""
+    out = []
+    i = 0
+    while i < len(value):
+        char = value[i]
+        if char == '$' and i + 1 < len(value):
+            rest = value[i + 1:]
+            if rest.startswith('$'):
+                out.append('$')
+                i += 2
+                continue
+            match = re.match(r'[A-Za-z_][A-Za-z0-9_]*', rest)
+            if match and match.group(0) in mapping:
+                out.append(str(mapping[match.group(0)]))
+                i += 1 + match.end()
+                continue
+            if rest.startswith('{'):
+                end = rest.find('}')
+                key = rest[1:end]
+                if end > 0 and key in mapping:
+                    out.append(str(mapping[key]))
+                    i += 2 + end
+                    continue
+        out.append(char)
+        i += 1
+    return ''.join(out)
+
+
+def read_ninja_tree(out_dir):
+    """(rules, edges) of a generated ninja tree: rule name -> variables, and the edges."""
+    if out_dir in _NINJA_CACHE:
+        return _NINJA_CACHE[out_dir]
+    rules = {}
+    edges = []
+    for root, _dirs, files in os.walk(out_dir):
+        for name in sorted(files):
+            if not name.endswith('.ninja'):
+                continue
+            scope = {}
+            rule_vars = None
+            for line in ninja_statements(os.path.join(root, name)):
+                if not line.strip() or line.lstrip().startswith('#'):
+                    continue
+                if line.startswith('rule '):
+                    rule_vars = {}
+                    rules[line.split()[1]] = rule_vars
+                    continue
+                if line.startswith('build '):
+                    left, _, right = line[len('build '):].partition(':')
+                    tail = right.split()
+                    edge = {
+                        'tool': tail[0] if tail else '',
+                        'inputs': tail[1:],
+                        # "|" and "||" separate implicit and order-only dependencies.
+                        'outputs': re.split(r'\s*\|\|?\s*', left.strip())[0].split(),
+                        'vars': {},
+                        'scope': dict(scope),
+                    }
+                    edges.append(edge)
+                    rule_vars = None
+                    continue
+                match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', line.strip())
+                if not match:
+                    continue
+                if line[:1] in (' ', '\t'):
+                    # An indented assignment belongs to the rule or edge above it.
+                    if rule_vars is not None:
+                        rule_vars[match.group(1)] = match.group(2)
+                    elif edges:
+                        edges[-1]['vars'][match.group(1)] = match.group(2)
+                else:
+                    scope[match.group(1)] = match.group(2)
+    _NINJA_CACHE[out_dir] = (rules, edges)
+    return rules, edges
+
+
+def edge_variables(edge, rules):
+    """The variables ninja would use for an edge: file scope, then rule, then edge."""
+    mapping = dict(edge['scope'])
+    mapping.update(rules.get(edge['tool'], {}))
+    mapping.update(edge['vars'])
+    mapping.setdefault('in', ' '.join(edge['inputs']))
+    mapping.setdefault('in_newline', '\n'.join(edge['inputs']))
+    mapping.setdefault('out', edge['outputs'][0] if edge['outputs'] else '')
+    mapping.setdefault('out_newline', '\n'.join(edge['outputs']))
+    return mapping
+
+
+def reconstructed_response_tokens(out_dir, rsp_path):
+    """The tokens ninja put in a response file it has deleted, or None if not found."""
+    if not out_dir:
+        return None
+    rules, edges = read_ninja_tree(out_dir)
+    wanted = os.path.basename(rsp_path.replace('\\', '/'))
+    for edge in edges:
+        mapping = edge_variables(edge, rules)
+        named = expand_ninja_vars(mapping.get('rspfile', ''), mapping)
+        if not named or os.path.basename(named.replace('\\', '/')) != wanted:
+            continue
+        content = expand_ninja_vars(mapping.get('rspfile_content', ''), mapping)
+        if content.strip():
+            return tokenize(content)
+    return None
+
+
 def response_file_tokens(path, out_dir):
     """The tokens held by a response file, or None when it cannot be read."""
     if out_dir and not os.path.isabs(path):
@@ -170,6 +304,10 @@ def expand_response_files(tokens, out_dir):
             continue
         for path in paths:
             content = response_file_tokens(path, out_dir)
+            if content is None:
+                # ninja deletes the response file when the command it was written for
+                # has finished, so on a built tree this is the normal path.
+                content = reconstructed_response_tokens(out_dir, path)
             if content is None:
                 # Left as a token: a caller who knows better can still see it there.
                 expanded.append('@' + path)
@@ -338,6 +476,10 @@ def main(argv=None):
     if not (whole or plain):
         print('parse_node_link: no archive was found in the link command.', file=sys.stderr)
         print('  command read: ' + used, file=sys.stderr)
+        if args.out_dir:
+            print('  no response file was readable and nothing in '
+                  f'{args.out_dir}/*.ninja described one either, so the archives inside it '
+                  'could not be recovered', file=sys.stderr)
         print('  is this the node target, and did the build use --ninja?', file=sys.stderr)
         sys.exit(1)
 
@@ -442,13 +584,45 @@ def selftest():
                ['ws2_32.lib', 'dbghelp.lib'],
                out_dir=work)
 
+        # ninja deletes a response file once the command it was written for has run, so
+        # on a tree that has been built the file is gone. Its content has to come back out
+        # of the ninja files: the rule names the file and the template that fills it, the
+        # edge carries the variables that template needs.
+        rebuilt = os.path.join(work, 'rebuilt')
+        os.makedirs(os.path.join(rebuilt, 'obj'))
+        with open(os.path.join(rebuilt, 'build.ninja'), 'w', encoding='utf-8') as handle:
+            handle.write(
+                'pool link_pool\n'
+                'rule link\n'
+                '  command = python3 gyp-win-tool link-with-manifests $arch True $binary '
+                '"link.exe /nologo /OUT:$binary @$binary.rsp" 1 $mt $rc\n'
+                '  rspfile = $binary.rsp\n'
+                '  rspfile_content = $in_newline $libs $ldflags\n')
+        with open(os.path.join(rebuilt, 'obj', 'node.ninja'), 'w', encoding='utf-8') as handle:
+            handle.write(
+                'build node.exe node.exe.pdb: link obj/src/node.node_main.obj '
+                'obj/node_base.lib $\n    obj/libuv.lib obj/libada.lib || obj/stamp.stamp\n'
+                '  binary = node.exe\n'
+                '  arch = environment.x64\n'
+                '  mt = mt.exe\n'
+                '  rc = rc.exe\n'
+                '  libs = ws2_32.lib\n'
+                '  ldflags = /WHOLEARCHIVE:obj/node_base.lib /WHOLEARCHIVE:obj/libuv.lib\n')
+        expect('MSVC, response file already deleted by ninja',
+               'python3 gyp-win-tool link-with-manifests environment.x64 True node.exe '
+               '"python3 gyp-win-tool link-wrapper environment.x64 False link.exe /nologo '
+               '/OUT:node.exe @node.exe.rsp" 1 mt.exe rc.exe "obj\\node.manifest"',
+               ['node_base.lib', 'libuv.lib'], ['libada.lib'], ['ws2_32.lib'],
+               out_dir=rebuilt)
+
     if failures:
         for line in failures:
             print('FAIL ' + line)
         print(f'parse_node_link --selftest: {len(failures)} problem(s)')
         return 1
     print('parse_node_link --selftest: PASS (GNU ld, ld64, ld64 two-token, '
-          'ld64 bare names, MSVC + rsp, MSVC through gyp-win-tool)')
+          'ld64 bare names, MSVC + rsp, MSVC through gyp-win-tool, MSVC with the rsp '
+          'file already deleted by ninja)')
     return 0
 
 

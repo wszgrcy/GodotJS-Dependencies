@@ -138,52 +138,12 @@ sys.exit(gyp_node.run_gyp([
 PY
 }
 
-# Write out/Release/<binary>.rsp the way ninja would, from the ninja file:
-#   rspfile = $binary.rsp
-#   rspfile_content = $in_newline $libs $ldflags
-write_link_rsp() {
-  python3 - "$1" "$2" <<'PY'
-import re
-import sys
+# ninja writes a link's response file just before running the link and deletes it
+# afterwards, and tools/parse_node_link.py rebuilds its content from the ninja files
+# (the rule says `rspfile_content = $in_newline $libs $ldflags`, the edge carries the
+# variables). Nothing here creates a response file: a leftover one would make the
+# rehearsal read a file the real build does not leave behind.
 
-out_release, binary = sys.argv[1], sys.argv[2]
-# The ninja file a target lands in is named after its .gyp file.
-lines = open(f"{out_release}/obj/node.ninja").read().split("\n")
-
-i = next(k for k, l in enumerate(lines) if l.startswith(f"build {binary}"))
-
-# A variable at column 0 applies to every build edge below it.
-scope, k = {}, 0
-while k < i:
-    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*) = (.*)$", lines[k])
-    if m:
-        value = m.group(2)
-        while lines[k].rstrip().endswith("$") and k + 1 < i:
-            k += 1
-            value += " " + lines[k].strip()
-        scope[m.group(1)] = value
-    k += 1
-
-text, j, edge = lines[i], i + 1, {}
-while j < len(lines) and lines[j].startswith("  "):
-    m = re.match(r"^  ([A-Za-z_][A-Za-z0-9_]*) = (.*)$", lines[j])
-    if m:
-        edge[m.group(1)] = m.group(2)
-    else:
-        text += " " + lines[j].strip()
-    j += 1
-
-text = re.sub(r"\\\s+", " ", text)
-inputs = text.split(":", 1)[1].split("|")[0].split("||")[0].split()
-vars_ = dict(scope)
-vars_.update(edge)
-one = lambda key: re.sub(r"\\\s+", " ", vars_.get(key, ""))
-
-with open(f"{out_release}/{binary}.rsp", "w") as handle:
-    handle.write("\n".join(inputs) + "\n" + one("libs") + "\n" + one("ldflags") + "\n")
-print(f"{len(inputs)} input lines written to {binary}.rsp")
-PY
-}
 
 count_asm_in_archive() {
   python3 - "$1" <<'PY'
@@ -429,7 +389,8 @@ if ! ( cd "$node_src" && ninja -C out/Release -t commands node > "$work/node-com
   sed 's/^/local_windows_ninja_check:   /' "$work/ninja-commands.err"
   problems=$((problems + 1))
 else
-  write_link_rsp "$node_src/out/Release" node.exe
+  # No response file is written here on purpose - see the note near the top of this
+  # script: ninja does not leave one behind, and the tool rebuilds its content.
   if ! python3 "$repo/tools/parse_node_link.py" --commands "$work/node-commands.txt" \
        --out-dir "$node_src/out/Release" \
        --whole "$work/whole.txt" --plain "$work/plain.txt" --system "$work/system.txt"; then
