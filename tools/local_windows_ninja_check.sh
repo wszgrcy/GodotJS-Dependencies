@@ -409,6 +409,19 @@ if [ "$asm_count" = "0" ] || [ "$asm_count" = "no-archive-edge" ]; then
   problems=$((problems + 1))
 fi
 
+# /WHOLEARCHIVE has to name a file the linker can actually open. node.gyp writes those
+# libraries where MSBuild puts them (lib/); ninja puts them under obj/, and the link then
+# dies with LNK1356 on a file nothing creates. This reads every generated ninja file, so
+# it catches the mismatch in seconds instead of at [4222/4233].
+if python3 "$repo/tools/check_wholearchive_paths.py" "$node_src/out/Release"; then
+  say "OK: every /WHOLEARCHIVE flag names a library this build produces"
+else
+  say "  FAIL: a /WHOLEARCHIVE flag names a library nothing produces; that link fails"
+  say "  with LNK1356. Check that"
+  say "  patches/godotjs-node-win-ninja-wholearchive-obj-paths.patch applied."
+  problems=$((problems + 1))
+fi
+
 # ninja -t commands needs to load every subninja, which is also the check that no
 # MSBuild-only syntax like $(Platform) survived into a ninja file.
 if ! ( cd "$node_src" && ninja -C out/Release -t commands node > "$work/node-commands.txt" 2>"$work/ninja-commands.err" ); then

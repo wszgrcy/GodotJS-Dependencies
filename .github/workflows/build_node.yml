@@ -664,6 +664,18 @@ jobs:
             python3 ../Scripts/tools/fix_windows_pch_flags.py out/Release
           fi
 
+          # /WHOLEARCHIVE:<lib> is how MSVC is told to keep everything in a static
+          # library, and node.gyp names those libraries where MSBuild writes them. Under
+          # ninja they are written under obj/ instead, so the first link that reaches one
+          # of them stops with "LNK1356: cannot find library `lib/zlib.lib'" - which, at
+          # [4222/4233], costs half an hour of compiling to find out. This reads the
+          # generated ninja files instead and prints every flag that names a library no
+          # build step produces. patches/godotjs-node-win-ninja-wholearchive-obj-paths.patch
+          # is what makes it pass.
+          if [ "$NODE_PLATFORM" = windows ]; then
+            python3 ../Scripts/tools/check_wholearchive_paths.py out/Release
+          fi
+
           # Torque writes the headers V8's own headers depend on, as one build step
           # among thousands. Two things happen here:
           #

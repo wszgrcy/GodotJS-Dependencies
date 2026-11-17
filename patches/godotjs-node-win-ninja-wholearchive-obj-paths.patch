@@ -1,0 +1,209 @@
+Point /WHOLEARCHIVE at the library the linker can actually find under ninja
+
+node.exe, node_mksnapshot.exe, cctest and embedtest link several static libraries
+through MSVC's /WHOLEARCHIVE so nothing in them is dropped as unused. node.gyp and
+node.gypi write those flags as <(PRODUCT_DIR)/lib/<name>.lib, which is where the
+MSBuild generator puts a static library. This build uses --ninja, and the ninja
+generator puts them under obj/<its directory>/ instead, so the first link that got
+that far failed on a file nobody creates:
+
+    [4222/4233] LINK_EMBED node_mksnapshot.exe
+    LINK : fatal error LNK1356: cannot find library `lib/zlib.lib' specified to be whole archived
+
+Nothing else complained because the real obj/... libraries are already inputs of the
+same link step - only this flag string pointed somewhere else.
+
+Node already keeps three spellings of the same library side by side: xcode_settings
+for Xcode, msvs_settings for MSBuild, and ldflags using <(obj_dir) for GNU ld. The
+msvs_settings one was simply never written for a ninja generator. common.gypi already
+branches on GENERATOR == "ninja" to define obj_dir, so the same test chooses the right
+spelling here, and a build that uses MSBuild keeps the flags it has today unchanged.
+
+diff -ruN a/node.gyp b/node.gyp
+--- a/node.gyp	2026-11-11 00:20:19.000000000 +0000
++++ b/node.gyp	2026-11-17 07:53:31.145214694 +0000
+@@ -660,15 +660,31 @@
+               '-Wl,-force_load,<(PRODUCT_DIR)/<(STATIC_LIB_PREFIX)node_base<(STATIC_LIB_SUFFIX)',
+             ],
+           },
+-          'msvs_settings': {
+-            'VCLinkerTool': {
+-              'AdditionalOptions': [
+-                '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/<(STATIC_LIB_PREFIX)node_base<(STATIC_LIB_SUFFIX)',
+-                '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/<(STATIC_LIB_PREFIX)v8_base_without_compiler<(STATIC_LIB_SUFFIX)',
+-              ],
+-            },
+-          },
+           'conditions': [
++            # /WHOLEARCHIVE has to name the file the linker can actually open, and
++            # where a static library lands depends on which generator produced the
++            # build: ninja writes obj/<name>.lib, MSBuild writes
++            # <(PRODUCT_DIR)/lib/<name>.lib. The obj/ spellings below are the ones the
++            # ldflags blocks in this same target already use.
++            ['GENERATOR == "ninja"', {
++              'msvs_settings': {
++                'VCLinkerTool': {
++                  'AdditionalOptions': [
++                    '/WHOLEARCHIVE:<(obj_dir)/<(STATIC_LIB_PREFIX)node_base<(STATIC_LIB_SUFFIX)',
++                    '/WHOLEARCHIVE:<(obj_dir)/tools/v8_gypfiles/<(STATIC_LIB_PREFIX)v8_base_without_compiler<(STATIC_LIB_SUFFIX)',
++                  ],
++                },
++              },
++            }, {
++              'msvs_settings': {
++                'VCLinkerTool': {
++                  'AdditionalOptions': [
++                    '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/<(STATIC_LIB_PREFIX)node_base<(STATIC_LIB_SUFFIX)',
++                    '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/<(STATIC_LIB_PREFIX)v8_base_without_compiler<(STATIC_LIB_SUFFIX)',
++                  ],
++                },
++              },
++            }],
+             ['node_use_bundled_v8=="true"', {
+               'xcode_settings': {
+                 'OTHER_LDFLAGS': [
+@@ -1188,15 +1204,28 @@
+               '-Wl,-force_load,<(PRODUCT_DIR)/<(STATIC_LIB_PREFIX)node_base<(STATIC_LIB_SUFFIX)',
+             ],
+           },
+-          'msvs_settings': {
+-            'VCLinkerTool': {
+-              'AdditionalOptions': [
+-                '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/<(STATIC_LIB_PREFIX)node_base<(STATIC_LIB_SUFFIX)',
+-                '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/<(STATIC_LIB_PREFIX)v8_base_without_compiler<(STATIC_LIB_SUFFIX)',
+-              ],
+-            },
+-          },
+           'conditions': [
++            # See the same block in the node_exe target above: ninja writes the static
++            # libraries into obj/, MSBuild into <(PRODUCT_DIR)/lib/.
++            ['GENERATOR == "ninja"', {
++              'msvs_settings': {
++                'VCLinkerTool': {
++                  'AdditionalOptions': [
++                    '/WHOLEARCHIVE:<(obj_dir)/<(STATIC_LIB_PREFIX)node_base<(STATIC_LIB_SUFFIX)',
++                    '/WHOLEARCHIVE:<(obj_dir)/tools/v8_gypfiles/<(STATIC_LIB_PREFIX)v8_base_without_compiler<(STATIC_LIB_SUFFIX)',
++                  ],
++                },
++              },
++            }, {
++              'msvs_settings': {
++                'VCLinkerTool': {
++                  'AdditionalOptions': [
++                    '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/<(STATIC_LIB_PREFIX)node_base<(STATIC_LIB_SUFFIX)',
++                    '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/<(STATIC_LIB_PREFIX)v8_base_without_compiler<(STATIC_LIB_SUFFIX)',
++                  ],
++                },
++              },
++            }],
+             ['node_use_bundled_v8=="true"', {
+               'xcode_settings': {
+                 'OTHER_LDFLAGS': [
+diff -ruN a/node.gypi b/node.gypi
+--- a/node.gypi	2026-11-11 00:20:19.000000000 +0000
++++ b/node.gypi	2026-11-17 07:52:13.590407474 +0000
+@@ -167,14 +167,29 @@
+               '-Wl,-force_load,<(PRODUCT_DIR)/<(STATIC_LIB_PREFIX)zlib<(STATIC_LIB_SUFFIX)',
+             ],
+           },
+-          'msvs_settings': {
+-            'VCLinkerTool': {
+-              'AdditionalOptions': [
+-                '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/zlib<(STATIC_LIB_SUFFIX)',
+-              ],
+-            },
+-          },
+           'conditions': [
++            # /WHOLEARCHIVE has to name the file the linker can actually open, and
++            # where a static library lands depends on which generator produced the
++            # build: ninja writes obj/<its directory>/<name>.lib, MSBuild writes
++            # <(PRODUCT_DIR)/lib/<name>.lib. Same two spellings the ldflags and
++            # xcode_settings blocks two lines below already use for their toolchain.
++            ['GENERATOR == "ninja"', {
++              'msvs_settings': {
++                'VCLinkerTool': {
++                  'AdditionalOptions': [
++                    '/WHOLEARCHIVE:<(obj_dir)/deps/zlib/zlib<(STATIC_LIB_SUFFIX)',
++                  ],
++                },
++              },
++            }, {
++              'msvs_settings': {
++                'VCLinkerTool': {
++                  'AdditionalOptions': [
++                    '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/zlib<(STATIC_LIB_SUFFIX)',
++                  ],
++                },
++              },
++            }],
+             ['OS!="aix" and OS!="os400" and OS!="ios" and node_shared=="false"', {
+               'ldflags': [
+                 '-Wl,--whole-archive',
+@@ -206,14 +221,26 @@
+               '-Wl,-force_load,<(PRODUCT_DIR)/libuv<(STATIC_LIB_SUFFIX)',
+             ],
+           },
+-          'msvs_settings': {
+-            'VCLinkerTool': {
+-              'AdditionalOptions': [
+-                '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/libuv<(STATIC_LIB_SUFFIX)',
+-              ],
+-            },
+-          },
+           'conditions': [
++            # See the zlib block above: ninja puts the library in obj/, MSBuild in
++            # <(PRODUCT_DIR)/lib/. The product is named libuv on Windows either way.
++            ['GENERATOR == "ninja"', {
++              'msvs_settings': {
++                'VCLinkerTool': {
++                  'AdditionalOptions': [
++                    '/WHOLEARCHIVE:<(obj_dir)/deps/uv/libuv<(STATIC_LIB_SUFFIX)',
++                  ],
++                },
++              },
++            }, {
++              'msvs_settings': {
++                'VCLinkerTool': {
++                  'AdditionalOptions': [
++                    '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/libuv<(STATIC_LIB_SUFFIX)',
++                  ],
++                },
++              },
++            }],
+             ['OS!="aix" and OS!="os400" and OS!="ios" and node_shared=="false"', {
+               'ldflags': [
+                 '-Wl,--whole-archive',
+@@ -419,14 +446,26 @@
+                   '-Wl,-force_load,<(PRODUCT_DIR)/<(openssl_product)',
+                 ],
+               },
+-              'msvs_settings': {
+-                'VCLinkerTool': {
+-                  'AdditionalOptions': [
+-                    '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/<(openssl_product)',
+-                  ],
+-                },
+-              },
+               'conditions': [
++                # See the zlib block above: ninja puts the library in obj/, MSBuild
++                # in <(PRODUCT_DIR)/lib/.
++                ['GENERATOR == "ninja"', {
++                  'msvs_settings': {
++                    'VCLinkerTool': {
++                      'AdditionalOptions': [
++                        '/WHOLEARCHIVE:<(obj_dir)/deps/openssl/<(openssl_product)',
++                      ],
++                    },
++                  },
++                }, {
++                  'msvs_settings': {
++                    'VCLinkerTool': {
++                      'AdditionalOptions': [
++                        '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/<(openssl_product)',
++                      ],
++                    },
++                  },
++                }],
+                 ['OS in "linux freebsd openharmony" and node_shared=="false"', {
+                   'ldflags': [
+                     '-Wl,--whole-archive',

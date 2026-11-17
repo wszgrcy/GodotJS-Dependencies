@@ -395,6 +395,19 @@ apply_build_patch "$SCRIPT_DIR/patches/godotjs-js2c-win-path-separator.patch" \
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-openssl-win-asm-outputs-as-sources.patch" \
                   "our gyp fix that puts the assembled OpenSSL objects in the library" always
 
+# --- Windows: /WHOLEARCHIVE named the MSBuild location, ninja writes obj/ ----------
+# Four executables link static libraries through MSVC's /WHOLEARCHIVE so their contents
+# are kept. node.gyp and node.gypi write those flag strings as
+# <(PRODUCT_DIR)/lib/<name>.lib, which is where MSBuild puts a static library; the ninja
+# generator puts the same libraries under obj/<its directory>/, and the linker then stops
+# with "LNK1356: cannot find library `lib/zlib.lib' specified to be whole archived". The
+# rest of that link is fine because the real obj/ libraries are already inputs of the same
+# step - only this flag pointed somewhere else. The patch picks the spelling with
+# GENERATOR == "ninja", the same test common.gypi uses for obj_dir, so an MSBuild build
+# keeps exactly the flags it has today.
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-node-win-ninja-wholearchive-obj-paths.patch" \
+                  "our fix that points /WHOLEARCHIVE at the ninja output directory" always
+
 # --- MSBuild's $(Platform) cannot survive into a ninja file ---------------------
 # deps/crates/crates.gyp builds the Rust side of Temporal. On Windows it names the
 # output directory and passes the platform to deps/crates/cargo_build.py with
