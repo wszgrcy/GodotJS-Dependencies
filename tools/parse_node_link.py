@@ -484,7 +484,10 @@ def main(argv=None):
         sys.exit(1)
 
     for path, names in ((args.whole, whole), (args.plain, plain), (args.system, system)):
-        with open(path, 'w', encoding='utf-8') as handle:
+        # newline='\n' on purpose: on Windows the default would write CRLF, and the
+        # reader in package_node.sh takes each line as a file name - a trailing CR
+        # turns into "zlib.lib\r", which is not a file that exists.
+        with open(path, 'w', encoding='utf-8', newline='\n') as handle:
             for name in names:
                 handle.write(name + '\n')
     print(f'package_node: {len(whole)} archive(s) whole-archive, {len(plain)} plain, '

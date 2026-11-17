@@ -112,6 +112,18 @@ else
     --whole "$WHOLE_FILE" --plain "$PLAIN_FILE" --system "$SYSTEM_FILE"
 fi
 
+# A carriage return in one of these lists is read as part of the archive name, and
+# "zlib.lib\r is not in out/Release" is a confusing thing to be told about a file
+# that plainly exists. Nothing written here should produce one (both writers open
+# their output with newline='\n'), but a list handed in through NODE_LINK_LIST can
+# come from anywhere, so trailing CR is dropped before anything reads the lists.
+for list in "$WHOLE_FILE" "$PLAIN_FILE" "$SYSTEM_FILE"; do
+  if grep -q $'\r' "$list"; then
+    tr -d '\r' < "$list" > "$list.lf" && mv "$list.lf" "$list"
+    echo "package_node: dropped carriage returns from $(basename "$list")"
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # 2. Copy the archives, rewriting the thin ones
 # ---------------------------------------------------------------------------
@@ -428,7 +440,7 @@ if args_path and os.path.isfile(args_path):
     manifest['configure_args'] = [line.strip() for line in open(args_path, encoding='utf-8')
                                   if line.strip() and not line.lstrip().startswith('#')]
 
-with open(out_path, 'w', encoding='utf-8') as handle:
+with open(out_path, 'w', encoding='utf-8', newline='\n') as handle:
     json.dump(manifest, handle, indent=2, sort_keys=True)
     handle.write('\n')
 print(f"package_node: manifest v8={v8_version} icu={manifest['icu_version']} "

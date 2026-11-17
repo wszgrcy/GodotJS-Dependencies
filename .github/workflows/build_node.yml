@@ -849,7 +849,8 @@ jobs:
           set +e
           [ "$NODE_PLATFORM" = windows ] || exit 0
           [ "$NODE_ARCH" = x86_64 ] || { echo "no nasm-built assembly for $NODE_ARCH"; exit 0; }
-          ossl=out/Release/obj/deps/openssl/openssl.lib
+          # This step runs in the repository directory; the build itself cd's into node/.
+          ossl=node/out/Release/obj/deps/openssl/openssl.lib
           if [ ! -f "$ossl" ]; then
             echo "$ossl was not produced; the build did not get that far"
             exit 0
