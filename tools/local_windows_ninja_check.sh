@@ -316,6 +316,70 @@ check_present "$node_src/out/Release/obj/node_base.ninja" \
 check_present "$node_src/out/Release/obj/tools/v8_gypfiles/v8_base_without_compiler.ninja" \
   "/Yu../../deps/v8/../../tools/msvs/pch/v8_pch.h" \
   "the v8 precompiled header path is untouched"
+# The repair script carries its own cases, including the Windows spellings this
+# machine cannot otherwise produce.
+if python3 "$repo/tools/fix_windows_pch_flags.py" --selftest; then
+  say "OK: the precompiled header repair rules pass their own cases"
+else
+  say "  FAIL: the precompiled header repair rules do not behave"
+  problems=$((problems + 1))
+fi
+# The generator's own rule, tested with a path function that spells the way Windows
+# does. A value that is already build-relative must not be translated a second time,
+# and "already build-relative" has to be recognised with both separators: on Windows
+# the translated value reads "..\tools\...", and translating that again is what put
+# four "../" on /Yu while /Yc had two, which clang-cl refuses.
+if python3 - "$node_src/tools/gyp/pylib" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import gyp.generator.ninja as ninja
+
+
+class Writer:
+    PCH_PATH_FLAGS = ninja.NinjaWriter.PCH_PATH_FLAGS
+    translate = ninja.NinjaWriter.PchFlagsRelativeToBuildDir
+
+    def __init__(self):
+        self.translated = []
+
+    def GypPathToNinja(self, path):
+        # What the real one returns on Windows: build-relative, backslashes.
+        self.translated.append(path)
+        return "..\\" + path.replace("/", "\\")
+
+
+cases = [
+    ("a path from the repository root is translated", ["/Yutools/msvs/pch/node_pch.h"],
+     ["/Yu..\\tools\\msvs\\pch\\node_pch.h"], 1),
+    ("a value already spelled with backslashes is left alone",
+     ["/Yu..\\..\\tools\\msvs\\pch\\node_pch.h"],
+     ["/Yu..\\..\\tools\\msvs\\pch\\node_pch.h"], 0),
+    ("a value already spelled with slashes is left alone",
+     ["/Yu../../tools/msvs/pch/node_pch.h"],
+     ["/Yu../../tools/msvs/pch/node_pch.h"], 0),
+    ("the same holds for /Yc", ["/Yc..\\..\\tools\\msvs\\pch\\node_pch.h"],
+     ["/Yc..\\..\\tools\\msvs\\pch\\node_pch.h"], 0),
+]
+
+failures = 0
+for title, flags, expected, calls in cases:
+    writer = Writer()
+    got = writer.translate(flags)
+    if got != expected or len(writer.translated) != calls:
+        failures += 1
+        print(f"  FAIL: {title}: got {got} after {len(writer.translated)} translation(s), "
+              f"expected {expected} after {calls}")
+print("local_windows_ninja_check: OK: the generator does not translate a build-relative "
+      "header path twice" if failures == 0 else
+      "local_windows_ninja_check: the generator's precompiled header rule is wrong")
+sys.exit(1 if failures else 0)
+PY
+then
+  :
+else
+  problems=$((problems + 1))
+fi
 # clang-cl compares the /Yc and /Yu header names as plain strings and drops both
 # flags when they differ, so in every target the step that creates the .pch and the
 # compiles that use it have to name the header identically. The same check the build
