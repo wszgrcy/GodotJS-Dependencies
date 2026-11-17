@@ -433,15 +433,24 @@ jobs:
           if [ -f staging/SHA256SUMS.txt ]; then
             files+=(staging/SHA256SUMS.txt)
           fi
-          if gh release view "$tag" > /dev/null 2>&1; then
-            gh release edit "$tag" --title "$tag" --notes "$notes"
+          # gh picks the repository from the git checkout it is in, and this step runs
+          # from the job workspace, one level above the ./Scripts checkout, so it has
+          # to be told. Every call names it: an unqualified call fails in a way that
+          # reads like "this release does not exist" and then create reports the tag
+          # as already taken.
+          repo="${{ github.repository }}"
+          if gh release view "$tag" --repo "$repo" --json tagName > /dev/null 2> gh-view.err; then
+            gh release edit "$tag" --repo "$repo" --title "$tag" --notes "$notes"
           else
+            sed 's/^/gh release view: /' gh-view.err
+            # Losing a race with a Node platform that published the same tag first is
+            # not a failure; editing what it created is the same result.
             gh release create "$tag" \
+              --repo "$repo" \
               --title "$tag" \
               --notes "$notes" \
-              --repo "${{ github.repository }}" \
-              --target "${{ github.sha }}"
+              --target "${{ github.sha }}" \
+              || gh release edit "$tag" --repo "$repo" --title "$tag" --notes "$notes"
           fi
-          gh release view "$tag" > /dev/null
-          gh release upload "$tag" "${files[@]}" --clobber
+          gh release upload "$tag" --repo "$repo" "${files[@]}" --clobber
 

@@ -1032,20 +1032,29 @@ jobs:
           # the others already published. The description is refreshed and this
           # platform's files replace their own old copies by name.
           notes="Prebuilt Node ${NODE_VERSION} libraries for GodotJS. Each file is one platform, published by that platform's own build job as soon as it passed; a platform missing here is still building or failed."
-          if gh release view "$tag" > /dev/null 2>&1; then
-            gh release edit "$tag" --title "$tag" --notes "$notes" --prerelease
+          # gh decides which repository to talk to by looking at the git checkout it
+          # is standing in, and this step is not standing in one: the repository is
+          # checked out into ./Scripts while steps run from the job workspace above
+          # it. Every call therefore names the repository. Without this a call that
+          # could not work out the repository fails like "no such release", which is
+          # what sent the step down the create path against a tag that already existed.
+          repo="${{ github.repository }}"
+          if gh release view "$tag" --repo "$repo" --json tagName > /dev/null 2> gh-view.err; then
+            gh release edit "$tag" --repo "$repo" --title "$tag" --notes "$notes" --prerelease
           else
+            # Keep the reason visible: last time this branch was taken the release did
+            # exist and the message explaining why was thrown away with the stderr.
+            sed 's/^/gh release view: /' gh-view.err
             # Two jobs can reach this in the same second, so losing the race to create
-            # is fine; what must not happen is uploading into a release that is not there.
+            # is not a failure: editing what the other one made is the same outcome.
             gh release create "$tag" \
+                 --repo "$repo" \
                  --title "$tag" \
                  --notes "$notes" \
                  --target "${{ github.sha }}" \
-                 --repo "${{ github.repository }}" \
                  --prerelease \
-              || true
+              || gh release edit "$tag" --repo "$repo" --title "$tag" --notes "$notes" --prerelease
           fi
-          gh release view "$tag" > /dev/null
-          gh release upload "$tag" "$asset" "$asset.sha256" --clobber
+          gh release upload "$tag" --repo "$repo" "$asset" "$asset.sha256" --clobber
           echo "release $tag now carries:"
-          gh release view "$tag" --json assets --jq '.assets[].name'
+          gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name'
