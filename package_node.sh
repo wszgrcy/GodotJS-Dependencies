@@ -266,75 +266,10 @@ done < <(cat "$WHOLE_FILE" "$PLAIN_FILE")
 # ---------------------------------------------------------------------------
 # 3. Headers
 # ---------------------------------------------------------------------------
-# Node already knows which headers an embedder needs: tools/install.py is what
-# builds the official node-vX-headers.tar.gz, so the bundle uses it instead of
-# guessing a header list. The result is the same layout, one directory:
-#   include/node/node.h, v8.h, uv.h, cppgc/, openssl/, js_native_api.h, ...
-# That single directory is the only -I an embedder needs.
-# (The header set Node installs is the public one on purpose. node_internals.h,
-# env-inl.h and friends are left out by Node; a binding layer that includes them
-# has to copy src/ itself and accept that they change without warning.)
-rm -rf "$STAGING/node/include"
-mkdir -p "$STAGING"
-install_args=()
-if [ "$PLATFORM" = windows ]; then
-  install_args+=(--is-win)
-fi
-(
-  cd "$NODE_SRC" &&
-  python3 tools/install.py install --headers-only \
-    --dest-dir "$STAGING/node" --prefix / \
-    --root-dir "$NODE_SRC" --build-dir "$NODE_OUT" \
-    --config-gypi-path "$NODE_SRC/config.gypi" "${install_args[@]}"
-) >/dev/null
-if [ ! -f "$INCLUDE_DIR/node.h" ] || [ ! -f "$INCLUDE_DIR/v8.h" ] || [ ! -f "$INCLUDE_DIR/uv.h" ]; then
-  echo "package_node: tools/install.py did not produce include/node/node.h, v8.h, uv.h." >&2
-  echo "  Node changed which headers it installs; check tools/install.py." >&2
-  exit 1
-fi
-
-# Node's installer ships what an addon needs, which is not quite what an engine
-# embedding Node needs: these V8 headers live in deps/v8/include but are not
-# installed, and GodotJS includes them directly (impl/v8/jsb_v8_pch.h).
-# A missing one is an error rather than a warning, so the surprise happens here
-# instead of in the first engine compile.
-#   v8-inspector.h       the inspector channel
-#   v8-version-string.h  V8's version string, used in diagnostics
-# Both only include headers installed above, so copying them is enough.
-for v8_extra in v8-inspector.h v8-version-string.h; do
-  if [ ! -f "$NODE_SRC/deps/v8/include/$v8_extra" ]; then
-    echo "package_node: $NODE_SRC/deps/v8/include/$v8_extra is missing." >&2
-    echo "  Node moved or dropped a header the engine includes; update this list." >&2
-    exit 1
-  fi
-  cp "$NODE_SRC/deps/v8/include/$v8_extra" "$INCLUDE_DIR/$v8_extra"
-done
-echo "package_node: added v8-inspector.h and v8-version-string.h to include/node"
-
-# OpenSSL's per-platform configure output ships next to its headers (Node does the
-# same in its own headers tarball). The tarball covers every platform, a bundle
-# covers one, so the other directories are dropped: 20 of them are 66 MB of the
-# 67 MB the header tree weighs.
-case "$PLATFORM/$ARCH" in
-  linux/x86_64)  openssl_arch=linux-x86_64 ;;
-  linux/arm64)   openssl_arch=linux-aarch64 ;;
-  macos/arm64)   openssl_arch=darwin64-arm64-cc ;;
-  macos/x86_64)  openssl_arch=darwin64-x86_64-cc ;;
-  windows/x86_64) openssl_arch=VC-WIN64A ;;
-  windows/arm64)  openssl_arch=VC-WIN64-ARM ;;
-  # Nothing to trim on Android or iOS: deps/openssl/config/archs in the Node source
-  # ships no android-* or ios* directory, so there is no matching folder to keep and
-  # the whole pre-generated set stays in the bundle (about 60 MB of headers nobody
-  # includes). Revisit after the first mobile build, when it is visible which
-  # configuration that target actually ends up using.
-  android/*|ios/*) openssl_arch="" ;;
-  *) openssl_arch="" ;;
-esac
-if [ -n "$openssl_arch" ] && [ -d "$INCLUDE_DIR/openssl/archs/$openssl_arch" ]; then
-  find "$INCLUDE_DIR/openssl/archs" -mindepth 1 -maxdepth 1 -type d \
-    ! -name "$openssl_arch" -exec rm -rf {} +
-  echo "package_node: kept openssl/archs/$openssl_arch only"
-fi
+# The same call CI makes before the long build, so a broken header install is
+# found in seconds there instead of after 40 minutes of compiling here.
+bash "$SCRIPT_DIR/tools/install_node_headers.sh" \
+  "$NODE_SRC" "$NODE_OUT" "$STAGING/node" "$PLATFORM" "$ARCH"
 
 # config.gypi and common.gypi describe the defines and flags this platform's
 # archives were built with, and install.py puts them next to the headers. They are
@@ -393,6 +328,23 @@ for key in ('v8_enable_pointer_compression', 'v8_enable_pointer_compression_shar
         print('define V8_COMPRESS_POINTERS')
 PY
 } > "$OUT_DIR/link.txt"
+
+# Every archive link.txt names has to be sitting next to it. A name that made it
+# into the list without being copied shows up, far from here, as a missing library
+# for whoever links the bundle - so it is checked here, where the cause is visible.
+missing_archives=()
+while read -r kind name _rest; do
+  case "$kind" in
+    whole | plain) [ -f "$OUT_DIR/$name" ] || missing_archives+=("$name") ;;
+  esac
+done < <(grep -vE '^\s*(#|$)' "$OUT_DIR/link.txt")
+if [ "${#missing_archives[@]}" -ne 0 ]; then
+  echo "package_node: link.txt names archives that are not in $OUT_DIR:" >&2
+  printf '  %s\n' "${missing_archives[@]}" >&2
+  exit 1
+fi
+listed_archives="$(grep -cE '^(whole|plain) ' "$OUT_DIR/link.txt" || true)"
+echo "package_node: link.txt names ${listed_archives:-0} archives, all present in node/$PLATFORM_DIR"
 
 # ---------------------------------------------------------------------------
 # 5. manifest.json

@@ -743,6 +743,30 @@ jobs:
           # runner the GitHub variables hold backslash paths (D:\a\_temp), and a
           # backslash inside a bash double-quoted string is not a separator, so the
           # file could not be created at all and the report below printed nothing.
+          #
+          # Before the long build: the two things the later steps need that need
+          # nothing from it. Both take seconds, and finding either after 40 minutes
+          # of compiling costs a whole round.
+          #   * the commands the later steps call by name have to exist on this
+          #     runner (everything is reported at once, and sha256sum is deliberately
+          #     not on the list because macOS runners have no coreutils)
+          #   * the header install that packaging does, which reads config.gypi and
+          #     is where an installer or option change shows up
+          missing_tools=()
+          for tool in python3 find tr du awk sed grep tar gzip gh; do
+            command -v "$tool" > /dev/null 2>&1 || missing_tools+=("$tool")
+          done
+          if [ "${#missing_tools[@]}" -ne 0 ]; then
+            echo "these commands are needed by the later steps and are not on PATH:" >&2
+            printf '  %s\n' "${missing_tools[@]}" >&2
+            exit 1
+          fi
+          header_check="$PWD/.headers-check"
+          rm -rf "$header_check"
+          bash ../Scripts/tools/install_node_headers.sh . out/Release \
+            "$header_check/node" "$NODE_PLATFORM" "$NODE_ARCH"
+          rm -rf "$header_check"
+
           ninja_log="$PWD/.ninja-build.log"
           # -k 20 keeps going after the first failure. Failures in independent
           # libraries (one archive, one link) are worth seeing in the same run: a
@@ -919,6 +943,16 @@ jobs:
           NODE_CONFIG_ARGS=args.txt \
             bash ../Scripts/package_node.sh . out/Release ../staging "$NODE_PLATFORM" "$NODE_ARCH"
 
+      - name: What came out
+        # Ahead of the verification: when the link check below fails, this is the
+        # evidence (bundle sizes and the whole of link.txt) that makes the failure
+        # readable in the same run.
+        run: |
+          set -euo pipefail
+          du -sh staging/node/* || true
+          ls -l staging/node/*release/ | head -60
+          cat staging/node/*release/link.txt
+
       - name: Verify the bundle
         # The probe compiles and runs on POSIX toolchains; on Windows the package
         # step is still checked, the link test is left to a local run.
@@ -936,13 +970,6 @@ jobs:
           fi
           du -sh node/out/Release || true
           df -h . || true
-
-      - name: What came out
-        run: |
-          set -euo pipefail
-          du -sh staging/node/* || true
-          ls -l staging/node/*release/ | head -60
-          cat staging/node/*release/link.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -991,8 +1018,13 @@ jobs:
           [ -s "$asset" ] || { echo "$asset was not written" >&2; exit 1; }
           # nodejs.org ships SHASUMS256.txt next to its tarballs for the same reason
           # this does: these files are fetched over a network by whoever builds the
-          # engine. One file per platform, so publishing stays race-free.
-          sha256sum "$asset" > "$asset.sha256"
+          # engine. One file per platform, so publishing stays race-free. python3 is
+          # used because sha256sum is coreutils and macOS runners do not have it. It
+          # reads in 1 MB blocks, and the list comprehension is there because a shell
+          # one-liner cannot hold a for statement.
+          python3 -c 'import hashlib, sys; p = sys.argv[1]; h = hashlib.sha256(); f = open(p, "rb"); [h.update(b) for b in iter(lambda: f.read(1 << 20), b"")]; print(f"{h.hexdigest()}  {p}")' \
+            "$asset" | tee "$asset.sha256"
+          [ -s "$asset.sha256" ] || { echo "$asset.sha256 is empty" >&2; exit 1; }
           echo "$asset: $(du -h "$asset" | cut -f1)"
 
           # Overwrite in place, never delete-and-recreate: this release page is shared

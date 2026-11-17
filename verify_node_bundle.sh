@@ -124,14 +124,29 @@ while read -r kind arg rest; do
 done < <(grep -vE '^\s*(#|$)' "$PLATFORM_DIR/link.txt")
 flush_whole
 
-# A bare -framework can only mean the framework name after it went missing, and
-# the linker complaint does not say where it came from.
-for token in "${LINK_ARGS[@]+"${LINK_ARGS[@]}"}"; do
-  if [ "$token" = "-framework" ]; then
+# A -framework with no framework name after it is a broken link.txt, and the linker
+# complaint ("framework '-framework' not found") does not say where it came from.
+# The pair itself is normal on macOS, so only a -framework that is last, or is
+# followed by another option, is the mistake - flagging every -framework makes a
+# perfectly good macOS bundle fail here.
+for ((i = 0; i < ${#LINK_ARGS[@]}; i++)); do
+  [ "${LINK_ARGS[i]}" = "-framework" ] || continue
+  next="${LINK_ARGS[i+1]:-}"
+  if [ -z "$next" ] || [ "${next:0:1}" = "-" ]; then
     echo "verify_node_bundle: link.txt has -framework with no framework name after it" >&2
+    echo "  the line it came from:" >&2
+    grep -n 'system' "$PLATFORM_DIR/link.txt" | sed 's/^/    /' >&2
     exit 1
   fi
 done
+
+# What the bundle claims and what this script made of it: when the link below
+# fails, these two listings are usually enough to see why without running anything
+# else, and without them the linker's complaint is the only evidence in the log.
+echo "verify_node_bundle: link.txt:"
+sed 's/^/    /' "$PLATFORM_DIR/link.txt"
+echo "verify_node_bundle: link line built from it (${#LINK_ARGS[@]} arguments):"
+printf '    %s\n' "${LINK_ARGS[@]}"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-verify.XXXXXX")"
 # NODE_VERIFY_KEEP=1 leaves the compiled probe behind, so it can be re-run under
