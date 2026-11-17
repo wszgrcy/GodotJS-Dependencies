@@ -1,0 +1,61 @@
+Let js2c name the built-in scripts the same way on Windows
+
+node_javascript.cc holds every built-in JavaScript file as a C array, and the name of
+each array is made from the file's path: "deps/acorn/acorn_walk/dist/walk.mjs" becomes
+internal_deps_acorn_acorn_walk_dist_walk_raw. node.gyp lists those paths with forward
+slashes, but on Windows ninja hands the action's arguments over in a response file and
+gyp normalizes separators while writing it, so js2c is given
+
+    deps\acorn\acorn_walk\dist\walk.mjs
+
+the "deps/" prefix is no longer recognised, the backslashes are not turned into "_"
+either, and the generated C++ reads
+
+    static const uint8_t deps\acorn\acorn_walk\dist\walk_raw[] = { ... };
+
+which clang-cl rejects ("default initialization of an object of const type", "expected
+';' after top level declarator", "redefinition of 'deps' with a different type"). Node's
+own Windows build does not hit this because it uses the MSBuild generator, whose action
+command lines never go through that normalisation - the same reason three earlier
+patches were needed for torque and for response-file arguments.
+
+Separators are canonicalized once, where the command line is read, so the prefix
+stripping and the identifier are computed from the spelling the build files use.
+Nothing changes elsewhere: a path with no backslash is returned unchanged.
+
+diff -ruN a/tools/js2c.cc b/tools/js2c.cc
+--- a/tools/js2c.cc	2026-11-11 00:20:20.000000000 +0000
++++ b/tools/js2c.cc	2026-11-17 04:05:59.694750271 +0000
+@@ -867,6 +867,23 @@
+   return 1;
+ }
+ 
++// Windows builds drive this tool from a ninja response file, and gyp normalizes
++// separators while writing one, so a file node.gyp listed as
++// "deps/acorn/acorn_walk/dist/walk.mjs" arrives as "deps\acorn\acorn_walk\dist\walk.mjs".
++// The name every file is registered under is made from that string - GetIdFromFilename
++// strips "deps/" and GetVariableName turns separators into "_" - so the backslash
++// spelling is not stripped, survives into the generated C++, and is not a valid
++// identifier. Forward slashes are the spelling the build files use, and Windows
++// accepts them for opening a file, so the tool sees one spelling everywhere.
++std::string UseForwardSlashes(std::string path) {
++  for (char& c : path) {
++    if (c == '\\') {
++      c = '/';
++    }
++  }
++  return path;
++}
++
+ int Main(int argc, char* argv[]) {
+   if (argc < 3) {
+     return PrintUsage(argv[0]);
+@@ -886,7 +903,7 @@
+       }
+       root_dir = argv[++i];
+     } else {
+-      args.emplace_back(argv[i]);
++      args.emplace_back(UseForwardSlashes(argv[i]));
+     }
+   }
+ 

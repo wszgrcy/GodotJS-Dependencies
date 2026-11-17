@@ -360,6 +360,21 @@ apply_build_patch "$SCRIPT_DIR/patches/godotjs-v8-snapshot-asm-to-cc.patch" \
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-torque-path-separator.patch" \
                   "our torque fix for backslash-separated source paths" always
 
+# --- Windows: the built-in scripts got names that are not valid identifiers ------------
+# js2c writes node_javascript.cc, one C array per built-in JavaScript file, and it makes
+# each array's name from the file's path: deps/acorn/acorn_walk/dist/walk.mjs becomes
+# internal_deps_acorn_acorn_walk_dist_walk_raw. On Windows ninja passes the action's
+# arguments through a response file and gyp normalizes separators writing it, so js2c is
+# handed deps\acorn\acorn_walk\dist\walk.mjs: the "deps/" prefix is no longer recognised,
+# the backslashes are not turned into "_", and the generated C++ reads
+# "static const uint8_t deps\acorn\...\walk_raw[]", which clang-cl rejects.
+#
+# Measured here by rebuilding the tool and running it on the real argument list: with the
+# patch, the output is byte-identical to today's (42f5d0c5894c020a) whether the paths are
+# given with slashes or with backslashes, so only the broken spelling changes behaviour.
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-js2c-win-path-separator.patch" \
+                  "our js2c fix for backslash-separated source paths" always
+
 # --- Windows: the assembled OpenSSL assembly never reached the library ----------------
 # OpenSSL's fast paths are hand-written assembly. On Windows those .asm files are in
 # nasm syntax, so gyp builds them with a rule that runs nasm and writes one .obj per
