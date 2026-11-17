@@ -186,35 +186,19 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Check that the release asset can be packed
-        # The published bundle is a .tar.zst, and the only thing that can produce it
-        # on every runner is the zstandard wheel - the Windows runners have no zstd
-        # command. This step installs it and runs a real pack/unpack round trip, so
-        # "the wheel is missing for this python", "the wheel will not import" and
-        # "the packing script is broken" are all answered in seconds instead of
-        # after a 40-minute build, when the asset is about to be published.
+      - name: Check that the release asset can be compressed
+        # The published bundle is a .tar.zst. Nothing on a Windows runner can make
+        # one as shipped (there is no zstd there), so this step gets zstd onto the
+        # machine - apt or brew where there is a package manager, the official win64
+        # zip otherwise - and then does a real pack plus unpack plus byte compare on
+        # a throwaway bundle. That answers, in seconds and on every platform:
+        # "can this runner get zstd at all", "does the downloaded binary run", "can
+        # this tar read the archive back". Finding any of those out at the end of a
+        # 40-minute build, when the asset is about to be published, wastes the round.
         run: |
           set -euo pipefail
-          # setup-python's interpreter is not a distro package, so the plain install
-          # is what works on the runners. The second try is only for a machine where
-          # python is distribution-managed (PEP 668), which is not the runner case but
-          # costs nothing to survive.
-          python3 -m pip install --quiet zstandard \
-            || python3 -m pip install --quiet --break-system-packages zstandard
-          python3 -c 'import zstandard; print("zstandard", zstandard.__version__, "| libzstd", ".".join(map(str, zstandard.ZSTD_VERSION)))'
-          sample="$PWD/.zstd-check"
-          rm -rf "$sample" "$sample.tar.zst"
-          mkdir -p "$sample/node/include"
-          # Compressible payload on purpose: the real thing is static archives full
-          # of symbol and debug records, not random bytes.
-          python3 -c 'import sys; open(sys.argv[1], "wb").write(b"node archive stand-in " * 400000)' \
-            "$sample/node/include/sample.bin"
-          python3 Scripts/tools/zstd_pack.py pack --directory "$sample" --name node \
-            --out "$sample.tar.zst" --level "$RELEASE_ZSTD_LEVEL"
-          python3 Scripts/tools/zstd_pack.py unpack --archive "$sample.tar.zst" --into "$sample/out"
-          cmp "$sample/node/include/sample.bin" "$sample/out/node/include/sample.bin"
-          rm -rf "$sample" "$sample.tar.zst"
-          echo "pack and unpack round-trip is good with level $RELEASE_ZSTD_LEVEL"
+          bash Scripts/tools/zstd_tool.sh ensure
+          bash Scripts/tools/zstd_tool.sh roundtrip --level "$RELEASE_ZSTD_LEVEL"
 
       - name: Developer environment for Visual Studio
         if: ${{ matrix.entry.platform == 'windows' }}
@@ -1047,7 +1031,7 @@ jobs:
           plat_arch="${plat_arch%.release}"
           plat_arch="${plat_arch%_release}"
           asset="node_${NODE_VERSION}_${plat_arch}.tar.zst"
-          python3 Scripts/tools/zstd_pack.py pack --directory staging --name node \
+          bash Scripts/tools/zstd_tool.sh pack --directory staging --name node \
             --out "$asset" --level "$RELEASE_ZSTD_LEVEL"
           # A truncated or missing archive here would sit on the release page looking
           # fine until someone tried to link against it.

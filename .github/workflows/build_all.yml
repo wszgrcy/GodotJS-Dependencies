@@ -363,11 +363,12 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends zip unzip python3-zstandard
-          # Same round trip as build_node.yml runs on every platform: it says in
-          # seconds whether this runner's python can compress an asset and read it
-          # back, instead of failing partway through the list below.
-          python3 -c 'import zstandard; d = zstandard.ZstdCompressor(level=15).compress(b"check" * 1000); assert zstandard.ZstdDecompressor().decompress(d) == b"check" * 1000; print("zstandard ok, libzstd", ".".join(map(str, zstandard.ZSTD_VERSION)))'
+          sudo apt-get install -y --no-install-recommends zip unzip zstd
+          # Same check the per-platform jobs do on their own runner; here it is quick
+          # because apt provides zstd. It compresses a sample and reads it back, so a
+          # broken zstd is not discovered halfway through the list below.
+          zstd --version
+          printf 'checkcheckcheck\n%.0s' $(seq 1 200) | zstd -q -15 | zstd -dcq | cmp - <(printf 'checkcheckcheck\n%.0s' $(seq 1 200))
           echo "Downloaded artifacts layout:"
           ls -R staging || true
 
@@ -402,7 +403,7 @@ jobs:
             plat_arch="${name%_release}"
             plat_arch="${plat_arch%.release}"
             asset="node_${{ github.event.inputs.node_version }}_${plat_arch}.tar.zst"
-            python3 Scripts/tools/zstd_pack.py pack --directory staging --name node \
+            bash Scripts/tools/zstd_tool.sh pack --directory staging --name node \
               --out "staging/$asset" --level 15
             echo "Created Node bundle: staging/$asset"
           done
