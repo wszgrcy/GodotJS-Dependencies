@@ -12,11 +12,12 @@
 #
 # What it changes, and why:
 #
-#   1. Appends node.extra_<major>.x.configure.txt to the args file, when that file
-#      exists. Node's configure is plain argparse: an option an older version does
-#      not declare makes configure fail, so options newer than the oldest version we
-#      build cannot live in the per-platform files. Same reason as
-#      v8.extra_15.x.args.gn.
+#   1. Appends node.extra_<major>.x.configure.txt, and node.extra_<major>.x.<dest-os>
+#      .configure.txt when that platform has its own file, to the args file. Node's
+#      configure is plain argparse: an option an older version does not declare makes
+#      configure fail, so options newer than the oldest version we build cannot live
+#      in the per-platform files - and an option only one platform should carry cannot
+#      live in the version file either. Same reason as v8.extra_15.x.args.gn.
 #
 #   2. Turns C++ RTTI back on (Node builds with -fno-rtti). Godot is compiled with
 #      RTTI on, and an embedder that derives from a Node or V8 class with virtual
@@ -116,19 +117,33 @@ case "$(basename "$ARGS_FILE")" in
     ;;
 esac
 
-EXTRA="$SCRIPT_DIR/node.extra_${NODE_MAJOR}.x.configure.txt"
-if [ -f "$EXTRA" ]; then
-  MARKER="# appended by prepare_node_build.sh from $(basename "$EXTRA")"
+# Version-specific arguments live in files next to this script, and both of these
+# names are honoured:
+#   node.extra_<major>.x.configure.txt            that major, every platform
+#   node.extra_<major>.x.<dest-os>.configure.txt   that major, one platform
+# The platform comes from the --dest-os= line in the args file: the file the job
+# passes is a copy named args.txt, so that line is the only place the platform is
+# still written.
+DEST_OS="$(sed -n 's/^--dest-os=\(.*\)$/\1/p' "$ARGS_FILE" | head -n 1)"
+extras=("node.extra_${NODE_MAJOR}.x.configure.txt")
+if [ -n "$DEST_OS" ]; then
+  extras+=("node.extra_${NODE_MAJOR}.x.${DEST_OS}.configure.txt")
+fi
+for name in "${extras[@]}"; do
+  EXTRA="$SCRIPT_DIR/$name"
+  if [ ! -f "$EXTRA" ]; then
+    echo "prepare_node_build: no $name"
+    continue
+  fi
+  MARKER="# appended by prepare_node_build.sh from $name"
   if grep -qF "$MARKER" "$ARGS_FILE"; then
-    echo "prepare_node_build: $(basename "$EXTRA") already appended, skipping"
+    echo "prepare_node_build: $name already appended, skipping"
   else
-    echo "prepare_node_build: appending $(basename "$EXTRA")"
+    echo "prepare_node_build: appending $name"
     printf '\n%s\n' "$MARKER" >> "$ARGS_FILE"
     cat "$EXTRA" >> "$ARGS_FILE"
   fi
-else
-  echo "prepare_node_build: no node.extra_${NODE_MAJOR}.x.configure.txt, using the file as is"
-fi
+done
 
 # --- ICU data has to be in the tree for full-icu -------------------------------
 # full-icu is Node's default, and it is the only ICU mode whose data has to come

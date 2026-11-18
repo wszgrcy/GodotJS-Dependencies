@@ -1,0 +1,63 @@
+# Extra ./configure arguments for Node.js 26.x on Linux only.
+#
+# prepare_node_build.sh appends this file when the Node major is 26 and the args
+# file it was given says --dest-os=linux. Uncomment the option at the bottom to
+# build a bundle that carries C++ debug information; it is left off by default
+# because of the size measured below.
+#
+# What the option does:
+#
+#   --debug-symbols   keeps C++ debug information in the release build. Node's own
+#                     help text: "add debugging symbols to release builds (adds -g
+#                     without enabling DCHECKs)" - the implementation is one line in
+#                     configure.py, which puts -g into the default compile flags.
+#
+# Debug information is the table a debugger reads to turn machine code back into
+# file, line, variable name and type. Nothing reads it at link time or run time.
+# Checked on real objects from this build: an object built with -g and one built
+# without it are byte-identical once the debug sections are removed
+# (objcopy --strip-debug on both, same SHA-256) - objects.o 0.97 MB vs 42.7 MB,
+# isolate.o 0.5 MB vs 28.7 MB, maglev-compiler.o 2.3 MB vs 57.2 MB. It matters
+# when someone has to step through V8 or Node C++ (a crash inside the snapshot,
+# the GC, Temporal's Rust side, or our own node:: lifecycle code) or turn a
+# backtrace of raw addresses into names with lines.
+#
+# Linux was the only platform without it. Windows gets CodeView because Node's
+# common.gypi sets DebugInformationFormat for MSVC unconditionally (/Z7, which
+# embeds it in each .obj), and macOS gets DWARF because gyp's
+# GCC_GENERATE_DEBUGGING_SYMBOLS defaults to on and adds -gdwarf-2. Node's Release
+# on Linux adds no -g at all, so a Linux bundle could not be debugged at the C++
+# level while the other two could.
+#
+# Why it is not switched on here: the size does not fit a GitHub release asset
+# (2 GB for one file), measured with 26.13.1 on Linux x86_64:
+#
+#   bundle with -g        17.64 GB unpacked,  2.97 GB as node_..._linux_x86_64.tar.zst
+#   bundle without -g     0.36 GB unpacked,   0.055 GB packed
+#
+# Two ways of shrinking that were measured and did not work:
+#
+#   - compress the debug sections inside the archives before packing
+#     (objcopy --compress-debug-sections=zstd, and =zlib-gnu gives the same):
+#     libv8_base_without_compiler.a 8.24 GB -> 4.08 GB, but packing that still
+#     needs 1.85 GB where the uncompressed archive packs to about 1.4 GB, so the
+#     outer zstd was already doing the job better and this only gets in its way.
+#   - a higher zstd level: level 19 saves a few percent, and the gap here is 50 %.
+#
+# Making it fit would mean the usual split-debug-file layout (objcopy
+# --only-keep-debug per archive, debug files published as several assets and put
+# under a debug-file-directory), which is its own piece of work. Until then, an
+# internal build that wants debug information gets it by uncommenting the line
+# below: the bundle is then over the release limit on purpose, the guard in
+# "Prepare the release asset" (RELEASE_ASSET_MAX_MB) says so, and the bundle is
+# taken from the run's artifact instead - note that the artifact step uploads the
+# unpacked staging tree, so expect roughly 18 GB there.
+#
+# The option is not put in node.extra_26.x.configure.txt because it must not reach
+# Windows, where clang-cl already gets /Z7 from common.gypi and a second -g only
+# duplicates debug records. It is not in the per-platform file either: ./configure
+# on Node 22.23.5 does not declare --debug-symbols and would stop with an
+# unknown-option error, so the option belongs to the version-specific files
+# (checked against v22.23.5 and v24.22.3: absent in 22, present in 24).
+
+# --debug-symbols

@@ -170,6 +170,13 @@ jobs:
       # 66 MB and level 19 gives 58 MB - while the time goes 8 s -> 30 s. Raise it to
       # 19 here if the download size starts to matter more than the extra minute.
       RELEASE_ZSTD_LEVEL: 15
+      # Stop before uploading an asset GitHub would reject: one release file may not
+      # pass 2 GB. Every bundle carries C++ debug information - Windows and macOS by
+      # Node's own default, Linux through node.extra_26.x.linux.configure.txt, which
+      # is switched off because it measures 2.97 GB packed. The macOS asset is at
+      # 1.7 GB, so there is little room, and the failure should not be discovered by
+      # the upload after a two-hour build.
+      RELEASE_ASSET_MAX_MB: 1900
       # Bionic API level the NDK wrappers target. 28 matches the minimum the Godot
       # Android export templates use.
       NODE_ANDROID_API: ${{ vars.NODE_ANDROID_API || '28' }}
@@ -1041,6 +1048,18 @@ jobs:
           # A truncated or missing archive here would sit on the release page looking
           # fine until someone tried to link against it.
           [ -s "$asset" ] || { echo "$asset was not written" >&2; exit 1; }
+          # Checked here, before the hash and the upload: the size of the packed file
+          # is the only thing on this path that a platform can exceed.
+          asset_bytes="$(wc -c < "$asset" | tr -d ' ')"
+          if [ "$asset_bytes" -gt "$((RELEASE_ASSET_MAX_MB * 1000 * 1000))" ]; then
+            echo "$asset is $((asset_bytes / 1000 / 1000)) MB, over the $RELEASE_ASSET_MAX_MB MB limit for one release asset." >&2
+            echo "  Options: set RELEASE_ZSTD_LEVEL to 19, or stop building debug" >&2
+            echo "  information - on Linux by commenting --debug-symbols back out of" >&2
+            echo "  Scripts/node.extra_26.x.linux.configure.txt, whose header says what" >&2
+            echo "  the other platforms do by default - or publish the debug information" >&2
+            echo "  separately from the archives." >&2
+            exit 1
+          fi
           # nodejs.org ships SHASUMS256.txt next to its tarballs for the same reason
           # this does: these files are fetched over a network by whoever builds the
           # engine. One file per platform, so publishing stays race-free. python3 is
