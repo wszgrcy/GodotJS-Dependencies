@@ -131,23 +131,114 @@ mkdir -p "$OUT_DIR"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-pkg.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-copy_fat() {
-  # $1 = archive name inside $NODE_OUT (searched recursively), $2 = destination dir
-  local name="$1" dest="$2" src=""
+# Which CPU an archive was built for, when this machine can tell.
+#
+# This script prints the path on stdout, so the answer comes back in the exit
+# status: 0 = holds the architecture being packaged, 1 = holds another one,
+# 2 = cannot tell (no lipo, which means not macOS, or an archive lipo cannot read).
+# Only macOS reports this; the Linux and Windows bundles are left alone.
+arch_state() {
+  local path="$1" expected="" info archs
+  case "$ARCH" in
+    x86_64 | amd64) expected=x86_64 ;;
+    arm64 | aarch64) expected=arm64 ;;
+    *) return 2 ;;
+  esac
+  command -v lipo > /dev/null 2>&1 || return 2
+  info="$(lipo -info "$path" 2> /dev/null)" || return 2
+  case "$info" in
+    *"architecture: "*) archs="${info##*architecture: }" ;;
+    *" are: "*) archs="${info##* are: }" ;;
+    *) return 2 ;;
+  esac
+  # Only the architecture part is looked at: the path itself usually contains the
+  # platform directory (macos.x86_64.release), so matching the whole line would
+  # call an arm64 archive correct. A case with no match would report success, so
+  # the mismatch has to be returned by name.
+  case " $archs " in
+    *" $expected "*) return 0 ;;
+  esac
+  return 1
+}
+
+# Full path of the archive to copy, left in ARCHIVE_SRC. When the build tree holds
+# more than one file with that name, the copy holding the packaged architecture wins.
+#
+# A cross build does hold several. Building x86_64 macOS on an arm64 machine, the
+# Rust Temporal crate is built once per toolset, and host-toolset output in general
+# sits under gen.host / obj.host / cargo/host. The first match used to win, which
+# put arm64 objects into the macos.x86_64 directory; the first link against that
+# bundle then failed with "found architecture 'arm64', required architecture
+# 'x86_64'" a few steps later, in a step that gave no hint about packaging.
+locate_archive() {
+  local name="$1" list="$WORK/locate.all" ordered="$WORK/locate.ordered" path
+  local count state
+  ARCHIVE_SRC=""
   if [ -f "$NODE_OUT/$name" ]; then
-    src="$NODE_OUT/$name"
-  else
-    # ninja nests archives (obj/deps/uv/libuv.a); find them without a hard-coded
-    # layout so a change in Node's build does not silently drop an archive.
-    src="$(find "$NODE_OUT" -name "$name" -type f -print -quit)"
+    ARCHIVE_SRC="$NODE_OUT/$name"
+    return 0
   fi
-  if [ -z "$src" ]; then
+  # ninja nests archives (obj/deps/uv/libuv.a); search without a hard-coded layout
+  # so a change in Node's build does not silently drop an archive.
+  find "$NODE_OUT" -name "$name" -type f -print > "$list"
+  count="$(wc -l < "$list" | tr -d ' ')"
+  if [ "$count" -eq 0 ]; then
+    return 1
+  fi
+  # Host-toolset paths last, so that a tree which can only be judged by its file
+  # names is judged in the order that is usually right; where the machine can read
+  # the architecture, arch_state overrules this order.
+  grep -vE '(^|/)(gen|obj)\.host/|/cargo/host/' "$list" > "$ordered" || true
+  grep -E '(^|/)(gen|obj)\.host/|/cargo/host/' "$list" >> "$ordered" || true
+  if [ "$count" -gt 1 ]; then
+    # Say what was found and what won: this line is read from a CI log afterwards,
+    # when the build directory is long gone.
+    echo "package_node: $name has $count copies under $NODE_OUT:"
+    while IFS= read -r path; do echo "    $path"; done < "$list"
+  fi
+  while IFS= read -r path; do
+    state=0
+    arch_state "$path" || state=$?
+    if [ "$state" -eq 0 ]; then
+      ARCHIVE_SRC="$path"
+      break
+    fi
+    # Nothing better yet: keep the first one this machine could not judge.
+    if [ "$state" -eq 2 ] && [ -z "$ARCHIVE_SRC" ]; then
+      ARCHIVE_SRC="$path"
+    fi
+  done < "$ordered"
+  [ -n "$ARCHIVE_SRC" ] || ARCHIVE_SRC="$(head -n 1 "$ordered")"
+  if [ "$count" -gt 1 ]; then
+    echo "package_node:    using $ARCHIVE_SRC"
+  fi
+}
+
+# Last line of defence: the archive that ended up in the bundle has to hold the
+# architecture the bundle is named after.
+check_arch() {
+  local path="$1" rc=0
+  arch_state "$path" || rc=$?
+  [ "$rc" -eq 1 ] || return 0
+  echo "package_node: $path does not hold objects for $PLATFORM/$ARCH:" >&2
+  lipo -info "$path" >&2 || true
+  echo "  The build tree keeps a copy per toolset; the 'using' line above says which"
+  echo "  copy was taken and the list above it shows what the build left behind." >&2
+  exit 1
+}
+
+copy_fat() {
+  # $1 = archive name inside $NODE_OUT, $2 = destination dir
+  local name="$1" dest="$2" src=""
+  locate_archive "$name" || {
     echo "package_node: $name is not in $NODE_OUT - was the node target built?" >&2
     exit 1
-  fi
+  }
+  src="$ARCHIVE_SRC"
   if [ "$(head -c 8 "$src")" != "!"'<thin>' ]; then
     # Already a normal archive (Apple's libtool, MSVC's lib.exe): copy as is.
     cp "$src" "$dest/$name"
+    check_arch "$dest/$name"
     return
   fi
 
@@ -256,7 +347,8 @@ copy_fat() {
     echo "  once and under its own name. The staging directory was $stage (removed)." >&2
     exit 1
   fi
-  echo "package_node: $(basename "$src") -> $name ($got object files${renamed:+, $renamed kept under a second name})"
+  check_arch "$dest/$name"
+  echo "package_node: $src -> $name ($got object files${renamed:+, $renamed kept under a second name})"
 }
 
 while IFS= read -r name; do

@@ -402,6 +402,9 @@ jobs:
             name="$(basename "$platform_dir")"
             plat_arch="${name%_release}"
             plat_arch="${plat_arch%.release}"
+            # One name shape for every platform: the directory is macos.arm64.release
+            # but windows_x86_64_release, and the asset names have to agree.
+            plat_arch="${plat_arch//./_}"
             asset="node_${{ github.event.inputs.node_version }}_${plat_arch}.tar.zst"
             bash Scripts/tools/zstd_tool.sh pack --directory staging --name node \
               --out "staging/$asset" --level 15

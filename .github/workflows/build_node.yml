@@ -1030,6 +1030,11 @@ jobs:
           plat_arch="$(basename "${platforms[0]}")"
           plat_arch="${plat_arch%.release}"
           plat_arch="${plat_arch%_release}"
+          # The build directory is macos.arm64.release but windows_x86_64_release,
+          # which gave the release files two different shapes (node_..._macos.arm64
+          # and node_..._windows_x86_64). One shape, so whatever downloads a bundle
+          # can build the name out of platform and architecture alone.
+          plat_arch="${plat_arch//./_}"
           asset="node_${NODE_VERSION}_${plat_arch}.tar.zst"
           bash Scripts/tools/zstd_tool.sh pack --directory staging --name node \
             --out "$asset" --level "$RELEASE_ZSTD_LEVEL"
