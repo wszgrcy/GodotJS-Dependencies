@@ -1,0 +1,62 @@
+Keep the Windows host tools on the build machine's own architecture
+
+Node's snapshot tools - mksnapshot, torque, and the builtins they generate - are built
+and then run by the same build, so they belong to gyp's "host" toolset. The ninja
+generator picked the toolchain environment from the architecture in the configuration
+(msvs_configuration_platform), which names the *target*, so the host toolset inherited
+the target's toolchain too. A native build never notices, because there the two are the
+same machine. Cross-building Windows arm64 from an x64 machine compiled mksnapshot with
+the arm64 toolchain, and the step after it could not start the .exe it had just
+produced.
+
+The host toolset now asks what architecture this machine is and uses that. A native
+build lands on the value it already had - an x64 machine building x64 changes nothing -
+and `--cross-compiling` is deliberately left alone: Node needs it to get the toolset
+split at all, and the split is now spelled correctly in the generated files.
+
+Checked without a Windows machine by generating the ninja files with the Windows
+flavour for an arm64 target (bash tools/local_windows_ninja_check.sh --arch arm64):
+
+    obj/tools/v8_gypfiles/v8_snapshot.host.ninja   arch = environment.x64
+    obj/node_base.ninja                            arch = environment.arm64
+
+  before this patch the host file said environment.arm64 and named $cl_arm64.
+
+--- a/tools/gyp/pylib/gyp/generator/ninja.py
++++ b/tools/gyp/pylib/gyp/generator/ninja.py
+@@ -24,6 +24,14 @@
+ from gyp import MSVSUtil, ninja_syntax
+ from gyp.common import GetEnvironFallback
+ 
++
++def _host_machine():
++    """GodotJS: architecture of the machine generating these files, lower case."""
++    import platform
++
++    return platform.machine().lower()
++
++
+ generator_default_variables = {
+     "EXECUTABLE_PREFIX": "",
+     "EXECUTABLE_SUFFIX": "",
+@@ -402,6 +410,20 @@
+         if self.flavor == "win":
+             self.msvs_settings = gyp.msvs_emulation.MsvsSettings(spec, generator_flags)
+             arch = self.msvs_settings.GetArch(config_name)
++            if spec["toolset"] == "host":
++                # GodotJS: a host-toolset object runs on the machine doing the build, so
++                # it has to be compiled with that machine's toolchain. Cross-building
++                # Windows arm64 from an x64 runner names the arm64 environment here, and
++                # the mksnapshot.exe it produces cannot be started by that runner.
++                host_arch = {
++                    "x86_64": "x64",
++                    "amd64": "x64",
++                    "aarch64": "arm64",
++                    "arm64": "arm64",
++                    "i686": "x86",
++                    "x86": "x86",
++                }.get(_host_machine(), arch)
++                arch = host_arch if host_arch in self.win_env else arch
+             self.ninja.variable("arch", self.win_env[arch])
+             self.ninja.variable("cc", "$cl_" + arch)
+             self.ninja.variable("cxx", "$cl_" + arch)

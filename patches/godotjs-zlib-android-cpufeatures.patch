@@ -1,0 +1,52 @@
+Give Android the CPU feature probe that zlib links against
+
+deps/zlib/cpu_features.c asks which ARM features the machine has before it picks a fast
+path. On Android it asks through android_getCpuFeatures(), and common.gypi points the
+include path at <NDK>/sources/android/cpufeatures for the header. There is no library
+to match: the NDK stopped shipping a prebuilt libcpu-features.a, so that directory
+holds only cpu-features.c and cpu-features.h, and every link that pulls in libzlib.a
+ends with
+
+    ld.lld: error: undefined symbol: android_getCpuFeatures
+    >>> referenced by cpu_features.c
+    >>>               zlib.cpu_features.o:(_cpu_check_features) in archive libzlib.a
+
+It is not limited to the sample program: libzlib.a is part of the bundle every embedder
+links, so the engine runs into the same undefined symbol.
+
+The NDK's own build rule for that directory (sources/android/cpufeatures/Android.mk)
+compiles the source into a static module, so the build does the same here: the zlib
+target gains one source when the target OS is Android. prepare_node_build.sh puts that
+file at deps/zlib/android_cpu_features.c as a link to <NDK>/sources/android/cpufeatures/
+cpu-features.c, because gyp refuses a source path that is absolute (crbug.com/462153),
+and a link keeps the NDK's own file - including its license header - as the thing being
+compiled. The include path for its header is already there: common.gypi adds it from
+<(android_ndk_path), the same variable prepare_node_build.sh passes with
+-Dandroid_ndk_path.
+
+Compiled into the archive that calls it, once, so nothing that links the bundle
+afterwards has to know about it.
+
+Reproduced and fixed by building Node 26.13.1 for android/arm64 with NDK r29: linking
+openssl-cli failed with the message above before this, and passes after it.
+
+--- a/deps/zlib/zlib.gyp
++++ b/deps/zlib/zlib.gyp
+@@ -203,6 +203,17 @@
+             }],
+             # Incorporate optimizations where possible.
+             ['(target_arch in "ia32 x64" and OS!="ios") or arm_fpu=="neon"', {
++              'conditions': [
++                ['OS=="android"', {
++                  # cpu_features.c asks android_getCpuFeatures() what this machine can
++                  # do. The NDK has the code for that but no library built from it, so
++                  # this compiles it here. prepare_node_build.sh places the NDK's file
++                  # under this name; gyp cannot be handed an absolute source path.
++                  'sources': [
++                    'android_cpu_features.c',
++                  ],
++                }],
++              ],
+               'dependencies': [ 'zlib_data_chunk_simd' ],
+               'sources': [ '<(ZLIB_ROOT)/slide_hash_simd.h' ]
+             }, {

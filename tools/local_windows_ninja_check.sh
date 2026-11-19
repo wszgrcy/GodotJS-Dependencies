@@ -4,7 +4,7 @@
 # build facts that a CI round would otherwise take 40 minutes to reveal.
 #
 #   bash tools/local_windows_ninja_check.sh --tarball /path/to/node-v26.13.1.tar.xz
-#   bash tools/local_windows_ninja_check.sh --tarball ... --work /work/winc
+#   bash tools/local_windows_ninja_check.sh --arch arm64 --tarball ... --work /work/winarm
 #   bash tools/local_windows_ninja_check.sh --work /work/winc --skip-prepare
 #
 # Why this exists: ninja on Windows is a combination Node's own CI never builds
@@ -40,6 +40,12 @@
 #   3. that the two Windows code paths fixed by patches/godotjs-gyp-win-pch-path.patch
 #      and patches/godotjs-v8-snapshot-asm-to-cc.patch look right in the graph.
 #
+# With --arch arm64 the same rehearsal also checks the three things that break when an
+# x64 machine builds Windows arm64: the host tools have to keep the machine's own
+# toolchain, clang-cl has to be told which architecture it is compiling, and the Rust
+# archive must not be produced twice with two different toolchains (see the checks
+# under "cross-building" below).
+#
 # Nothing here runs a compiler: no cl.exe, no link.exe, no nasm. It checks what the
 # build is about to do, not what it produced.
 
@@ -49,19 +55,29 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tarball=""
 work="${TMPDIR:-/tmp}/node-win-ninja-check"
 skip_prepare=0
+arch=x86_64
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --tarball) tarball="$2"; shift 2 ;;
     --work) work="$2"; shift 2 ;;
     --skip-prepare) skip_prepare=1; shift ;;
+    --arch) arch="$2"; shift 2 ;;
     *) echo "local_windows_ninja_check: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 
+case "$arch" in
+  x86_64) target_arch=x64 ;;
+  arm64) target_arch=arm64 ;;
+  *) fail "--arch is '$arch', expected x86_64 or arm64" ;;
+esac
+# The toolchain of the machine running this script; the host toolset has to keep it.
+host_arch=x64
+
 node_src="$work/node"
 fake_vs="$work/fake-vs"
-args_file="$repo/node.windows_x86_64.configure.txt"
+args_file="$repo/node.windows_${arch}.configure.txt"
 
 say() { echo "local_windows_ninja_check: $*"; }
 fail() { echo "local_windows_ninja_check: FAIL - $*" >&2; exit 1; }
@@ -72,7 +88,7 @@ fail() { echo "local_windows_ninja_check: FAIL - $*" >&2; exit 1; }
 make_fake_vs() {
   local vs="$1"
   local msvc="$vs/VC/Tools/MSVC/14.40.33807"
-  mkdir -p "$msvc/include" "$msvc/lib/x64" "$vs/VC/Auxiliary/Build" "$vs/bin"
+  mkdir -p "$msvc/include" "$msvc/lib/$target_arch" "$vs/VC/Auxiliary/Build" "$vs/bin"
   : > "$msvc/include/stdio.h"   # gyp checks that the include dir is a real dir
   # gyp runs this and parses the variables out of it. SYSTEMROOT, TEMP and TMP are
   # required by _ExtractImportantEnvironment; the rest feed INCLUDE/LIB/PATH.
@@ -80,8 +96,8 @@ make_fake_vs() {
 #!/bin/sh
 V="$msvc"
 echo "INCLUDE=\$V/include"
-echo "LIB=\$V/lib/x64"
-echo "LIBPATH=\$V/lib/x64"
+echo "LIB=\$V/lib/$target_arch"
+echo "LIBPATH=\$V/lib/$target_arch"
 echo "PATH=$vs/bin"
 echo "PATHEXT=.COM;.EXE;.BAT"
 echo "SYSTEMROOT=$work"
@@ -194,18 +210,43 @@ export PATH="$fake_vs/bin:$PATH"
 # Rust's Windows target is rarely installed on a Linux machine. Without it,
 # configure would refuse Temporal; rehearsing without Temporal is fine as long as
 # the summary says so, because node_crates.lib then leaves the archive list.
+rust_windows_target="${target_arch/x64/x86_64}-pc-windows-msvc"
 if [ "${NODE_TEMPORAL:-}" = "" ]; then
-  if ! rustc --print target-list 2>/dev/null | grep -qx x86_64-pc-windows-msvc || \
-     ! ls "$(rustc --print sysroot)/lib/rustlib" 2>/dev/null | grep -qx x86_64-pc-windows-msvc; then
+  if ! rustc --print target-list 2>/dev/null | grep -qx "$rust_windows_target" || \
+     ! ls "$(rustc --print sysroot)/lib/rustlib" 2>/dev/null | grep -qx "$rust_windows_target"; then
     export NODE_TEMPORAL=off
-    say "the Rust target x86_64-pc-windows-msvc is not installed, so Temporal is off"
+    say "the Rust target $rust_windows_target is not installed, so Temporal is off"
     say "  for this rehearsal; node_crates.lib will be missing from the archive list"
   fi
 fi
 
+# An x64 machine building arm64 has to tell clang-cl which architecture it wants:
+# clang-cl picks the target from --target and defaults to the architecture clang itself
+# was built for. The triple goes in through CFLAGS/CXXFLAGS, which gyp appends to the
+# target toolset's command line only (generator/ninja.py reads CFLAGS_host/CXXFLAGS_host
+# for the host toolset), which is exactly where it belongs: putting it on the host
+# toolset would compile mksnapshot for the target and this machine could not run it.
+if [ "$arch" != x86_64 ]; then
+  case "$target_arch" in
+    arm64) triple="--target=aarch64-windows-msvc" ;;
+    x64) triple="--target=x86_64-windows-msvc" ;;
+  esac
+  export CFLAGS="$triple" CXXFLAGS="$triple"
+  say "target toolset flags from the environment: $triple"
+fi
+
+# This machine is not an arm64 machine, so the arm64 rehearsal reproduces the cross
+# shape: host x64, target arm64. That is what asks for the toolset split, and the split
+# is what the cross-build checks below look at. A native arm64 runner has no split, and
+# its argument file node.windows_arm64.configure.txt does not pass this flag.
+if [ "$arch" != x86_64 ]; then
+  printf -- '--cross-compiling\n' >> "$work/args.txt.cross"
+fi
+
 if [ "$skip_prepare" -eq 0 ]; then
-  say "prepare_node_build.sh with the windows x86_64 arguments"
+  say "prepare_node_build.sh with the windows $arch arguments"
   cp "$args_file" "$work/args.txt"
+  [ -f "$work/args.txt.cross" ] && cat "$work/args.txt.cross" >> "$work/args.txt"
   bash "$repo/prepare_node_build.sh" "$node_src" "$work/args.txt" 26.13.1
 
   # The version belongs to the machine, so the workflow appends it at run time.
@@ -410,6 +451,72 @@ else
     fi
     if [ "${NODE_TEMPORAL:-on}" = off ] && ! grep -qx node_crates.lib "$work/plain.txt"; then
       say "  as expected without Temporal: node_crates.lib is not in the list"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Cross-building arm64 on an x64 machine: the three things that break
+# ---------------------------------------------------------------------------
+# These only apply to the arm64 rehearsal, where the machine's own architecture is not
+# the architecture being built. Every one of them is checked in the generated files,
+# because each one has cost a full CI round to find.
+if [ "$arch" = arm64 ]; then
+  # 1. The snapshot tools run on the build machine, so they belong to the host toolset
+  #    and have to keep this machine's toolchain. patches/godotjs-gyp-win-clang-cl.patch
+  #    makes that happen; without it the host objects name the arm64 compiler and the
+  #    build then cannot start the mksnapshot.exe it just produced.
+  host_ninja="$node_src/out/Release/obj/tools/v8_gypfiles/v8_snapshot.host.ninja"
+  [ -f "$host_ninja" ] || fail "no host-toolset ninja file was generated ($host_ninja)"
+  check_present "$host_ninja" "arch = environment.$host_arch" \
+    "the host toolset keeps this machine's toolchain (mksnapshot has to run here)"
+  check_absent "$host_ninja" "arch = environment.$target_arch" \
+    "the host toolset is not built with the target's toolchain"
+  check_present "$node_src/out/Release/obj/node_base.ninja" \
+    "arch = environment.$target_arch" \
+    "the target toolset uses the architecture being built"
+
+  # 2. clang-cl is one compiler for every architecture and picks the one it compiles
+  #    from --target; its default is the architecture clang itself was built for. So a
+  #    cross build needs the triple in the flags, or every arm64 object is x86_64 and
+  #    the link dies on the first ARM64-only symbol (or worse, silently ships the wrong
+  #    architecture). The path Node hands clang-cl carries no triple, so it comes in
+  #    through CFLAGS/CXXFLAGS - gyp appends them to the target toolset only
+  #    (generator/ninja.py reads CFLAGS/CXXFLAGS for the target and *_host for host),
+  #    which is what the next two checks prove: the triple is on the target's command
+  #    line and absent from the host's, where it would break mksnapshot.
+  triple=""
+  case "$target_arch" in
+    arm64) triple="--target=aarch64-windows-msvc" ;;
+    x64) triple="--target=x86_64-windows-msvc" ;;
+  esac
+  if [ -n "$triple" ] && [ "${NODE_TARGET_TRIPLE:-on}" != off ]; then
+    check_present "$node_src/out/Release/obj/node_base.ninja" "$triple" \
+      "clang-cl is told which architecture to compile (target toolset)"
+    check_absent "$host_ninja" "$triple" \
+      "the host toolset keeps clang's own default target"
+  fi
+
+  # 3. Temporal is Rust, and cargo writes its archive to a path taken from
+  #    target/$(host triple)/release, which gyp makes absolute with abspath() - a path
+  #    with no toolset in it. A build with two toolsets therefore has two rules
+  #    producing one file, which ninja refuses before it compiles anything.
+  #    patches/node-66823-rust-host-target.patch skips Windows on purpose, so the build
+  #    is configured with --without-snapshot-temporal instead; these two checks show the
+  #    collision is really gone rather than merely untested.
+  crates_rules="$(grep -lE '^build [^:]*node_crates\.lib' \
+    $(find "$node_src/out/Release/obj" -name '*.ninja') 2>&1 || true)"
+  crates_files="$(grep -hoE 'node_crates\.lib' $(find "$node_src/out/Release/obj" -name '*.ninja') 2>&1 | wc -l || true)"
+  say "node_crates.lib appears in $(printf '%s\n' "$crates_rules" | grep -c . ) rule(s) and $crates_files place(s) in total"
+  if [ "${NODE_TEMPORAL:-on}" = on ]; then
+    if [ "$(printf '%s\n' "$crates_rules" | grep -c .)" -gt 1 ]; then
+      say "  FAIL: more than one rule generates node_crates.lib; ninja stops with"
+      say "  'multiple rules generate'. This is the upstream bug, not ours:"
+      say "  node-66823-rust-host-target.patch skips Windows, so Temporal has to stay"
+      say "  off for a Windows cross build (the workflow says so out loud)."
+      problems=$((problems + 1))
+    else
+      say "OK: node_crates.lib has exactly one producing rule"
     fi
   fi
 fi

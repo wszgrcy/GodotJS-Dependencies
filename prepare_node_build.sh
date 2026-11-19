@@ -213,15 +213,102 @@ case "${dest_os:-linux}" in
 "Point them at the Android NDK wrapper compilers in \$NDK/toolchains/llvm/prebuilt/<host>/bin/, named after the target and API level, for example aarch64-linux-android28-clang and -clang++. Node's own ./android-configure <NDK> <API> <arch> sets the same compilers (as plain CC/CXX) and then runs ./configure with --dest-os=android --openssl-no-asm --cross-compiling; either route works, this script only needs the variables." \
 "CC_target CXX_target AR_target NM_target READELF_target"
 
+    # Two gyp variables only an Android build needs, handed to ./configure as extra
+    # -D arguments (configure.py forwards unknown arguments straight to gyp). Both
+    # come from upstream's own ./android-configure, which puts them in GYP_DEFINES;
+    # they are not optional - without them gyp stops before writing anything:
+    #
+    #   android_ndk_path  common.gypi's OS=="android" branch adds
+    #                     -I<(android_ndk_path)/sources/android/cpufeatures, and an
+    #                     undefined variable is a hard gyp error:
+    #                       gyp: Undefined variable android_ndk_path in node.gyp
+    #   host_os           tools/v8_gypfiles/v8.gyp asks `_toolset=="host" and
+    #                     host_os=="linux"` for the host toolset's linker flags, and
+    #                     nothing else in the tree defines host_os:
+    #                       gyp: name 'host_os' is not defined while evaluating
+    #                       condition '_toolset=="host" and host_os=="linux"'
+    #
+    # The NDK path is read back out of the compiler this script already checked: the
+    # wrapper compilers live in <ndk>/toolchains/llvm/prebuilt/<host>/bin/, so four
+    # path components up is the NDK. That keeps one source of truth; the CI job and a
+    # local run only have to say which compilers to use.
+    ndk_compiler="${CC_target:-${CC:-}}"
+    ndk_root=""
+    case "$ndk_compiler" in
+      */toolchains/llvm/prebuilt/*/bin/*)
+        ndk_root="${ndk_compiler%/toolchains/llvm/prebuilt/*/bin/*}" ;;
+    esac
+    if [ -z "$ndk_root" ]; then
+      echo "prepare_node_build: cannot work out the NDK root from the compiler:" >&2
+      echo "  $ndk_compiler" >&2
+      echo "  gyp needs the NDK path (common.gypi adds an include directory from it)," >&2
+      echo "  and the wrapper compilers are expected at" >&2
+      echo "  <ndk>/toolchains/llvm/prebuilt/<host>/bin/<triple><api>-clang." >&2
+      exit 1
+    fi
+    if [ ! -d "$ndk_root/sources/android/cpufeatures" ]; then
+      echo "prepare_node_build: $ndk_root/sources/android/cpufeatures does not exist." >&2
+      echo "  common.gypi compiles against that header directory; the NDK at" >&2
+      echo "  $ndk_root looks incomplete." >&2
+      exit 1
+    fi
+    # host_os is the machine running the build, not the target: gyp's own name for
+    # Linux is "linux" and for macOS "darwin" (the same pair android-configure sets).
+    # This runs before the block below works out the host, so it is read here.
+    case "$(uname -s)" in
+      Linux)  android_host_os=linux ;;
+      Darwin) android_host_os=darwin ;;
+      *)
+        echo "prepare_node_build: no gyp host_os name for $(uname -s)" >&2
+        exit 1
+        ;;
+    esac
+    printf -- '-Dandroid_ndk_path=%s\n' "$ndk_root" >> "$ARGS_FILE"
+    printf -- '-Dhost_os=%s\n' "$android_host_os" >> "$ARGS_FILE"
+    echo "prepare_node_build: gyp gets android_ndk_path=$ndk_root host_os=$android_host_os"
+
+    # zlib's ARM feature probe calls android_getCpuFeatures(), and the NDK only ships
+    # that as a source file (sources/android/cpufeatures/Android.mk builds it into a
+    # module), so patches/godotjs-zlib-android-cpufeatures.patch adds it to the zlib
+    # target. gyp cannot be handed an absolute source path, so the NDK's own file -
+    # license header and all - is linked in beside the code that calls it.
+    cpufeatures_link="$NODE_SRC/deps/zlib/android_cpu_features.c"
+    rm -f "$cpufeatures_link"
+    ln -s "$ndk_root/sources/android/cpufeatures/cpu-features.c" "$cpufeatures_link"
+    echo "prepare_node_build: zlib's android_cpu_features.c -> $cpufeatures_link"
+
+    # The NDK has to be new enough, and "which NDK" is the one question this script
+    # cannot answer from the args file. V8 14.6 (what Node 26.13.1 embeds) uses
+    # std::atomic_ref in deps/v8/src/base/memcopy.h, and the NDK's libc++ only
+    # implements it from r29 (clang 21): with r26d (clang 17) and r28c (clang 19)
+    # the C++20 <atomic> header has __cpp_lib_atomic_ref commented out, and every
+    # V8 compile that reaches that header stops with
+    #   error: no member named 'atomic_ref' in namespace 'std'
+    # which is twenty minutes into a build and says nothing about the NDK. So ask
+    # the compiler now: it costs about a second.
+    atomic_probe="$(mktemp --suffix=.cc)"
+    printf '#include <atomic>\n#include <cstddef>\ntemplate <typename T>\nvoid f(T* p, T v) {\n  std::atomic_ref<T>(*p).store(v, std::memory_order_relaxed);\n}\nint main() { int x = 0; f(&x, 1); return x; }\n' > "$atomic_probe"
+    if ! probe_out="$("${CXX_target:-${CXX:-c++}}" -std=gnu++20 -fsyntax-only "$atomic_probe" 2>&1)"; then
+      echo "prepare_node_build: this NDK's C++ standard library has no std::atomic_ref," >&2
+      echo "  which V8 14.6 needs (deps/v8/src/base/memcopy.h). The compiler was" >&2
+      echo "  ${CXX_target:-${CXX:-c++}} and it said:" >&2
+      printf '%s\n' "$probe_out" | sed 's/^/    /' >&2
+      echo "  Measured on the NDKs' libc++ headers: r26d (clang 17) and r28c (clang 19)" >&2
+      echo "  do not define __cpp_lib_atomic_ref, r29 (clang 21) does. Use NDK r29 or" >&2
+      echo "  newer for Android Node."
+      rm -f "$atomic_probe"
+      exit 1
+    fi
+    rm -f "$atomic_probe"
+    echo "prepare_node_build: this NDK's libc++ has std::atomic_ref (V8 14.6 needs it)"
+
     # OpenSSL's generated configurations in the source tree cover linux, macOS,
     # Windows and friends (deps/openssl/config/archs/), but there is no android-*
-    # directory there. Until an Android build is run end to end, that is the most
-    # likely place for it to stop; saying it here beats discovering it at 90% of a
-    # two-hour compile.
+    # directory there. That is what --openssl-no-asm in the args files is for.
     if ! ls "$NODE_SRC"/deps/openssl/config/archs/android* >/dev/null 2>&1; then
       echo "prepare_node_build: note - deps/openssl/config/archs has no android entry,"
-      echo "  so OpenSSL's configuration for this target is not pre-generated. If the"
-      echo "  build stops inside deps/openssl, that is the place to look first."
+      echo "  so OpenSSL's configuration for this target is not pre-generated; the"
+      echo "  args file passes --openssl-no-asm for that reason."
     fi
     ;;
   ios)
@@ -341,6 +428,12 @@ apply_build_patch "$SCRIPT_DIR/patches/node-66823-rust-host-target.patch" \
                   "nodejs/node#66823 (per-toolset Rust archives for Temporal cross builds)" cross
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-clang-cl.patch" \
                   "our gyp hook that lets ninja use clang-cl on Windows" always
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-host-toolset.patch" \
+                  "our gyp fix that keeps the Windows host tools on the build machine" always
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-zlib-android-cpufeatures.patch" \
+                  "our zlib fix that compiles the Android CPU feature probe" always
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-v8-trap-handler-host-toolset.patch" \
+                  "our V8 fix that gives a cross build's host toolset the posix trap handler" always
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-rsp-path-arg.patch" \
                   "our gyp fix that keeps option values and C-string defines out of path normalization" always
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-pch-path.patch" \
