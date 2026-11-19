@@ -219,13 +219,16 @@ jobs:
       only: windows
     secrets: inherit
 
-  # Android Node is cross-compiled with the NDK. Upstream does not support it (Node
-  # 26 removed its android configure helper), so the job stays off until it has been
-  # run green: set the repository variable NODE_ANDROID=true to include it, or
-  # dispatch build_node.yml with only=android while testing it. Keeping it out of
-  # the default matrix means an unproven target cannot fail a release.
+  # Android Node is cross-compiled with the NDK (android arm64 and android x86_64;
+  # android arm32 cannot be built on a 64-bit host - see the note in build_node.yml).
+  # Upstream does not support it (Node 26 removed its android configure helper), so
+  # the fixes are ours: patches/godotjs-zlib-android-cpufeatures.patch and
+  # patches/godotjs-v8-trap-handler-host-toolset.patch. Both targets have gone through
+  # configure, ninja, package_node.sh and verify_node_bundle.sh with those scripts on a
+  # linux/x86_64 machine (NDK r29, API 28), so the platform is on by default and
+  # SKIP_ANDROID=true turns it off.
   node_android:
-    if: ${{ inputs.runtime != 'v8' && vars.NODE_ANDROID == 'true' }}
+    if: ${{ inputs.runtime != 'v8' && vars.SKIP_ANDROID != 'true' }}
     uses: ./.github/workflows/build_node.yml
     with:
       node_version: ${{ inputs.node_version }}
@@ -234,11 +237,13 @@ jobs:
 
   # iOS as well: gyp has no ios flavour, so the toolchain is handed to configure as
   # wrapper compilers (see node.ios_arm64.configure.txt for the three obstacles
-  # found in Node's own build machinery). Third-party builds prove it is reachable;
-  # ours has not been run yet, hence the variable. Respects SKIP_APPLE because it
-  # needs a macOS runner.
+  # found in Node's own build machinery). The wrapper generation lives in
+  # tools/apple_toolchain.sh and tools/test_apple_toolchain.sh exercises it against a
+  # fake SDK on any machine, so the part that is not covered by a macOS runner here
+  # still has a repeatable check. SKIP_IOS=true turns the target off; SKIP_APPLE does
+  # too, because it needs a macOS runner.
   node_ios:
-    if: ${{ inputs.runtime != 'v8' && vars.NODE_IOS == 'true' && vars.SKIP_APPLE != 'true' }}
+    if: ${{ inputs.runtime != 'v8' && vars.SKIP_IOS != 'true' && vars.SKIP_APPLE != 'true' }}
     uses: ./.github/workflows/build_node.yml
     with:
       node_version: ${{ inputs.node_version }}

@@ -313,7 +313,7 @@ case "${dest_os:-linux}" in
     ;;
   ios)
     require_cross_toolchain ios \
-"gyp has no ios flavour, so nothing derives an Apple toolchain for you: point these at wrapper compilers that bake in -target arm64-apple-ios<version> and -isysroot \$(xcrun --sdk iphoneos --show-sdk-path). build_node.yml writes those wrappers." \
+"gyp has no ios flavour, so nothing derives an Apple toolchain for you: point these at wrapper compilers that bake in the SDK and the target triple. tools/apple_toolchain.sh writes them - for a device that is the iphoneos SDK with -target <arch>-apple-ios<version>, for the simulator the iphonesimulator SDK with a triple ending in -simulator - and build_node.yml calls it." \
 "CC_target CXX_target AR_target NM_target"
 
     # iOS cannot allocate executable memory, so V8 has to run without a JIT. The

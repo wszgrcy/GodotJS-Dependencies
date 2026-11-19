@@ -18,9 +18,9 @@ standalone bundle carries another would mean two engines to test for no benefit.
 
 | | `v8_<ver>.zip`, one monolith per platform | `node_<ver>_<platform>.<arch>.zip`, 36 archives + headers |
 |---|---|---|
-| Android | today's default: GodotJS links `libv8_monolith.a` | cross-built with the NDK; job off until it has built green (`NODE_ANDROID=true`) |
-| iOS | today's default: same | cross-built against the iPhoneOS SDK; job off until green (`NODE_IOS=true`). iOS forbids executable memory, so an embedder must start Node with JIT disabled |
-| Linux, macOS, Windows | still usable, and what the engine links today | the Node path |
+| Android | today's default: GodotJS links `libv8_monolith.a` | arm64 and x86_64, cross-built with NDK r29 (`SKIP_ANDROID=true` turns them off); arm32 needs a 32-bit ARM build machine (V8 refuses that cross build), see `node.android_arm32.configure.txt` |
+| iOS | today's default: same | `arm64` against the iPhoneOS SDK, plus `x86_64` for the iPhone simulator: Godot builds the simulator as `arch=x86_64 simulator=yes`, so the bundle carries that name even though no iOS device has an x86 CPU (`SKIP_IOS=true` turns both off). The wrapper compilers come from `tools/apple_toolchain.sh`, and `tools/test_apple_toolchain.sh` checks them on any machine against a stand-in SDK. iOS forbids executable memory, so an embedder must start Node with JIT disabled |
+| Linux, macOS, Windows | still usable, and what the engine links today | Linux x86_64 and arm64, macOS arm64 plus x86_64 (cross-built on the arm64 runner), Windows x86_64 and arm64 (GitHub's arm64 Windows runner); `SKIP_WINDOWS=true` / `SKIP_APPLE=true` turn them off |
 | Web export | not needed | not needed: GodotJS's web bridge (`impl/web`) runs inside the browser's own JavaScript engine |
 
 Two consequences of V8 following Node, both deliberate:

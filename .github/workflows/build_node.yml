@@ -65,6 +65,16 @@ jobs:
     outputs:
       entries: ${{ steps.pick.outputs.entries }}
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the Apple toolchain wrappers
+        # tools/apple_toolchain.sh writes the compiler wrappers that give the iOS and
+        # macOS-cross jobs their SDK and target triple. It cannot be exercised on a Linux
+        # machine against a real Xcode, so this runs it against a stand-in SDK and a
+        # logging xcrun and asserts what the compiler would be handed. Doing it here, in
+        # seconds, is what keeps a wrong triple from surfacing an hour into a macOS build.
+        run: bash tools/test_apple_toolchain.sh
+
       - id: pick
         env:
           ONLY: ${{ inputs.only }}
@@ -75,46 +85,58 @@ jobs:
 
           entries = [
             {"platform": "linux", "arch": "x86_64", "runner": "ubuntu-24.04"},
-            # Native arm64 runner: Node builds its own V8 snapshot with a
-            # host-arch mksnapshot, which a cross build cannot do without qemu.
+            # Native arm64 runner, because the build has to run its own mksnapshot and
+            # torque. A cross build would need the host toolset to be built for x86_64
+            # while still producing arm64 V8 internals (that is what the NDK entries do,
+            # with the simulator - see patches/godotjs-v8-trap-handler-host-toolset.patch)
+            # plus an aarch64 cross compiler for the target and --openssl-no-asm. It has
+            # never been tried for the linux entry, and a free native runner needs none
+            # of it, so this stays on the arm64 image.
             {"platform": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm"},
             {"platform": "macos", "arch": "arm64", "runner": "macos-latest"},
             # macOS x86_64 is cross-built on the arm64 runner, which splits Node's
-            # toolset and therefore needs the two fixes prepare_node_build.sh carries
-            # (docs/node-26.md section 10.1). Native Intel images exist but are not
-            # usable by default: every hosted Intel macOS label is a *larger* runner
-            # (macos-15-intel / macos-15-large, macos-26-intel / macos-26-large), and
-            # GitHub offers larger runners only on the Team and Enterprise Cloud
-            # plans, so on a Free or Pro account the job would queue and never start.
-            # Switch here if this repository ever gets such a plan.
+            # toolset and therefore needs the two fixes prepare_node_build.sh carries.
+            # Node 26 asks for Xcode >= 16.4, and the arm64 image's Xcode is newer than
+            # that, so nothing has to be pinned here.
+            #
+            # Native Intel images do exist, but every hosted Intel macOS label is a
+            # *larger* runner (macos-15-intel / macos-15-large, macos-26-intel /
+            # macos-26-large), and GitHub only offers larger runners on the Team and
+            # Enterprise Cloud plans: on a Free or Pro account such a job would queue and
+            # never start. Switch this entry if the repository ever gets one of those.
             {"platform": "macos", "arch": "x86_64", "runner": "macos-latest",
              "cargo_target": "x86_64-apple-darwin"},
             {"platform": "windows", "arch": "x86_64", "runner": "windows-2022"},
-            # arm64 Windows is not in the matrix. Building it from this x64 runner runs
-            # into three separate gaps, each checked locally by generating the ninja
-            # files with the Windows flavour:
-            #   - the host toolset: gyp gives the host and the target toolset the same
-            #     architecture (obj.host/*/….ninja said `arch = environment.arm64`), and
-            #     the build-time tools (mksnapshot, torque) have to run on the runner.
-            #   - the compiler: gyp's clang-cl hook only adds -m64/-m32, and clang-cl on
-            #     an x64 host cannot emit arm64 objects without also being given
-            #     --target=aarch64-windows-msvc. Upstream reaches that through MSBuild's
-            #     ClangCL toolset (vcbuild), which the ninja path cannot see.
-            #   - Temporal: with a split toolset the Rust archive collides (ninja: multiple
-            #     rules generate gen/arm64/release/node_crates.lib), and Node's own fix
-            #     (patches/node-66823-rust-host-target.patch) skips Windows on purpose.
-            # A native arm64 Windows runner removes all three (no toolset split, clang-cl
-            # targets its own architecture), so add the entry back there:
-            #   {"platform": "windows", "arch": "arm64", "runner": "<native arm64>"}
-            # The argument file node.windows_arm64.configure.txt is kept as the recipe.
-            # Cross builds: the host machine is the same Linux x86_64 runner for
-            # all three, the target differs. Host tools (mksnapshot, the JS snapshot
-            # blob) are still built with the host compiler, which is what makes
-            # these work without qemu.
+            # arm64 Windows builds on GitHub's own arm64 Windows runner. The label is
+            # in actions/runner-images' index ("Windows 11 Arm64 with Visual Studio
+            # 2026": windows-11-arm), and that image already carries everything this
+            # job installs: VS with VC.Tools.ARM64 and VC.Llvm.Clang, ninja, rustup,
+            # Windows SDKs 10.0.22621 and 10.0.26100. Because the runner's own
+            # architecture is the target's, none of the gaps a cross build from an x64
+            # runner falls into can appear: there is no host/target toolset split to
+            # get wrong, clang-cl emits its own architecture without being told, and
+            # Rust builds Temporal once. tools/local_windows_ninja_check.sh --arch arm64
+            # rehearses the cross shape instead (this machine is x64) and covers what
+            # that shape would need: the host-toolset fix in
+            # patches/godotjs-gyp-win-host-toolset.patch, --target=aarch64-windows-msvc
+            # on the target toolset only, and Temporal off, because
+            # patches/node-66823-rust-host-target.patch skips Windows on purpose.
+            {"platform": "windows", "arch": "arm64", "runner": "windows-11-arm",
+             "vs_arch": "arm64"},
+            # Android: both targets are cross-built on the same Linux x86_64 runner,
+            # with the NDK supplying the target compiler. Host tools (mksnapshot, the JS
+            # snapshot blob) are still built with the runner's own compiler, which is
+            # what makes these work without qemu.
             {"platform": "android", "arch": "arm64", "runner": "ubuntu-24.04",
              "cargo_target": "aarch64-linux-android"},
-            {"platform": "android", "arch": "arm32", "runner": "ubuntu-24.04",
-             "cargo_target": "armv7-linux-androideabi"},
+            # android arm32 (armv7) is not in the matrix, and not because nobody tried
+            # it: V8 refuses to be built for 32-bit ARM from a 64-bit machine. Compiling
+            # anything with -DV8_TARGET_ARCH_ARM on an x64 host stops at
+            #   deps/v8/include/v8config.h:994: error: Target architecture arm is only
+            #   supported on arm and ia32 host
+            # which also rules out the arm64 hosted runner (V8_HOST_ARCH_ARM64 is not
+            # arm or ia32 there either). Producing android.arm32 needs a 32-bit ARM
+            # build machine; node.android_arm32.configure.txt keeps the recipe for it.
             {"platform": "android", "arch": "x86_64", "runner": "ubuntu-24.04",
              "cargo_target": "x86_64-linux-android"},
             # iOS: built from a macOS runner with wrapper compilers that bake in the
@@ -123,6 +145,16 @@ jobs:
             # run mksnapshot. See node.ios_arm64.configure.txt.
             {"platform": "ios", "arch": "arm64", "runner": "macos-latest",
              "cargo_target": "aarch64-apple-ios"},
+            # The iOS simulator. No iOS device has an x86 CPU, so this is not a device
+            # target: Godot builds the simulator as `platform=ios arch=x86_64
+            # simulator=yes`, and the module asks for a bundle named after the engine's
+            # own arch name - node_<version>_ios.x86_64.tar.zst - which is why the target
+            # has to exist. The arguments are the device file's with a different CPU; the
+            # simulator lives in the toolchain (-target
+            # x86_64-apple-ios<version>-simulator, the iPhoneSimulator SDK, and cargo's
+            # x86_64-apple-ios-sim), written by tools/apple_toolchain.sh --simulator.
+            {"platform": "ios", "arch": "x86_64", "runner": "macos-latest",
+             "cargo_target": "x86_64-apple-ios-sim", "simulator": "true"},
           ]
 
           for entry in entries:
@@ -217,9 +249,12 @@ jobs:
         # every later step, which a bash step cannot do by itself.
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
-          # arm64 Node is cross-built from an x64 host, which is what vcvarsall's
-          # amd64_arm64 is for.
-          arch: ${{ matrix.entry.arch == 'arm64' && 'amd64_arm64' || 'amd64' }}
+          # Which vcvarsall environment to load. Every entry says so itself: the x64
+          # entries want the amd64 prompt, and the arm64 entry runs on an arm64 runner
+          # so it wants the arm64 one (an amd64_arm64 cross prompt would hand the build
+          # an x64 host toolchain, which is what made the host tools of a cross build
+          # the wrong architecture).
+          arch: ${{ matrix.entry.vs_arch || 'amd64' }}
 
       - name: Rust toolchain for Temporal
         # Temporal (the JS API) is built from deps/crates with cargo, and Node enables
@@ -247,6 +282,13 @@ jobs:
         # Runs on the image's bash; this step installs the newer bash the rest of the
         # job then uses, so it has to stay compatible with 3.2.
         shell: bash
+        env:
+          # The Apple branches hand this to tools/apple_toolchain.sh as --rust-triple,
+          # so cargo's build scripts and Node's own compile lines use one toolchain.
+          CARGO_TARGET: ${{ matrix.entry.cargo_target }}
+          # "true" on the iOS simulator entry: same SDK queries and a triple that ends in
+          # -simulator instead of the device's.
+          NODE_IOS_SIMULATOR: ${{ matrix.entry.simulator }}
         run: |
           set -euo pipefail
           case "$NODE_PLATFORM" in
@@ -317,28 +359,23 @@ jobs:
               host_arch="$(uname -m)"
               [ "$host_arch" = aarch64 ] && host_arch=arm64
               if [ "$NODE_ARCH" != "$host_arch" ]; then
-                xc_bin="$RUNNER_TEMP/node-mac-bin"
-                mkdir -p "$xc_bin"
-                printf '#!/bin/sh\nexec xcrun --sdk macosx clang -arch %s "$@"\n' "$NODE_ARCH" > "$xc_bin/cc"
-                printf '#!/bin/sh\nexec xcrun --sdk macosx clang++ -arch %s "$@"\n' "$NODE_ARCH" > "$xc_bin/cxx"
-                chmod +x "$xc_bin"/*
-                {
-                  echo "CC_target=$xc_bin/cc"
-                  echo "CXX_target=$xc_bin/cxx"
-                  # The host toolset (mksnapshot, torque, the other programs the build
-                  # runs on the runner itself) has to be compiled by the runner's own
-                  # compiler. gyp looks only at CC_host/CXX_host for it and otherwise
-                  # reuses the target compiler (generator/ninja.py: `if not cc_host:
-                  # cc_host = cc`), which would build those programs as $NODE_ARCH and
-                  # then be unable to run them: the arm64 sources the build picks for
-                  # the host toolset would be handed to an x86_64 compiler.
-                  echo "CC_host=cc"
-                  echo "CXX_host=c++"
-                  # The bundle check compiles its probe with the target compiler, so the
-                  # probe comes out as $NODE_ARCH like everything else in the bundle.
-                  echo "NODE_VERIFY_CXX=$xc_bin/cxx"
-                } >> "$GITHUB_ENV"
-                echo "cross build $host_arch -> $NODE_ARCH: $(cat "$xc_bin/cxx")"
+                # Same wrapper trick as iOS, and the same script: for macOS the only
+                # missing piece is -arch, and the script prints CC_host/CXX_host=cc/c++
+                # so the host toolset (mksnapshot, torque, the other programs the build
+                # runs on the runner itself) is still compiled by the runner's own
+                # compiler. gyp looks only at CC_host/CXX_host for it and otherwise
+                # reuses the target compiler (generator/ninja.py: `if not cc_host:
+                # cc_host = cc`), which would build those programs as $NODE_ARCH and
+                # then be unable to run them.
+                xflags=()
+                if [ -n "${CARGO_TARGET:-}" ]; then xflags+=(--rust-triple "$CARGO_TARGET"); fi
+                # ${xflags[@]+...} instead of "${xflags[@]}": the image's /bin/bash is 3.2,
+                # and there an empty array under `set -u` counts as unset, which would stop
+                # the step with "xflags[@]: unbound variable".
+                bash "$GITHUB_WORKSPACE/tools/apple_toolchain.sh" \
+                  --platform macos --arch "$NODE_ARCH" ${xflags[@]+"${xflags[@]}"} \
+                  --out-dir "$RUNNER_TEMP/node-mac-bin" >> "$GITHUB_ENV"
+                echo "cross build $host_arch -> $NODE_ARCH: $(cat "$RUNNER_TEMP/node-mac-bin/cxx")"
 
                 # Running the probe needs Rosetta on an arm64 runner. Check now rather
                 # than after a 30-minute build: without it the check stops at the link,
@@ -505,7 +542,19 @@ jobs:
               # NM_target/READELF_target, and the NDK wrapper compilers already have
               # the target and API level in their file names, so those variables are
               # all configure needs. prepare_node_build.sh repeats the check and
-              # explains the same thing if a variable is missing.
+              # explains the same thing if a variable is missing. It also hands gyp the
+              # two Android-only variables (android_ndk_path, host_os), which upstream
+              # puts in GYP_DEFINES from ./android-configure; without them gyp stops
+              # with "Undefined variable android_ndk_path".
+              #
+              # The NDK has to be r29 or newer. Node 26 embeds V8 14.6, which uses
+              # std::atomic_ref (deps/v8/src/base/memcopy.h), and the NDK's libc++
+              # first implements it in r29 (clang 21): r26d (clang 17) and r28c
+              # (clang 19) leave __cpp_lib_atomic_ref commented out in <atomic>, and
+              # every V8 compile then fails with "no member named 'atomic_ref' in
+              # namespace 'std'" about ten minutes in. The images are behind that, so
+              # the check below names the sdkmanager package to install instead of
+              # letting the build die in V8; NODE_ANDROID_NDK overrides.
               ndk="${NODE_ANDROID_NDK:-${ANDROID_NDK_LATEST_HOME:-}}"
               if [ -z "$ndk" ] && [ -d "${ANDROID_HOME:-}/ndk" ]; then
                 newest="$(ls -1 "${ANDROID_HOME}/ndk" | sort -V | tail -1)"
@@ -514,9 +563,13 @@ jobs:
               if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
                 echo "No Android NDK. Set NODE_ANDROID_NDK, or let the image provide"
                 echo "ANDROID_NDK_LATEST_HOME, or install one with:"
-                echo "  sdkmanager --install 'ndk;28.2.13676358'"
+                echo "  sdkmanager --install 'ndk;29.0.14202488'"
                 exit 1
               fi
+              # "New enough" is decided by the standard library, not by a version
+              # string: the wrapper compiler is asked to compile std::atomic_ref. The
+              # same probe runs inside prepare_node_build.sh, so a machine that gets
+              # past here gets past there too.
               case "$(uname -s)" in
                 Linux) host_tag=linux-x86_64 ;;
                 Darwin) host_tag=darwin-x86_64 ;;
@@ -535,6 +588,15 @@ jobs:
                   exit 1
                 fi
               done
+              printf '#include <atomic>\nint main(){int x=0;std::atomic_ref<int>(x).store(1);return x;}\n' > "$RUNNER_TEMP/atomic_ref_check.cc"
+              if ! "$ndk_bin/${triple}-clang++" -std=gnu++20 -fsyntax-only "$RUNNER_TEMP/atomic_ref_check.cc"; then
+                echo "$ndk is too old for Node 26: its libc++ has no std::atomic_ref,"
+                echo "  which V8 14.6 needs. Measured: NDK r26d (clang 17) and r28c"
+                echo "  (clang 19) fail this, r29 (clang 21) passes. Install r29+:"
+                echo "  sdkmanager --install 'ndk;29.0.14202488'"
+                exit 1
+              fi
+              echo "$ndk can compile std::atomic_ref (Node 26's V8 needs it)"
               {
                 echo "CC_target=$ndk_bin/${triple}-clang"
                 echo "CXX_target=$ndk_bin/${triple}-clang++"
@@ -560,37 +622,26 @@ jobs:
               # gyp has no "ios" flavour, so Node would otherwise keep using the host
               # toolchain and produce macOS objects. There is no wrapper compiler for
               # iPhoneOS the way the NDK has one, and a compiler flag cannot be passed
-              # through CC_target as a bare string, so write tiny wrappers that bake in
-              # the triple and the SDK path.
-              deployment="${NODE_IOS_DEPLOYMENT:-16.0}"
-              sdk_path="$(xcrun --sdk iphoneos --show-sdk-path)"
-              xc_bin="$RUNNER_TEMP/node-xc-bin"
-              mkdir -p "$xc_bin"
-              printf '#!/bin/sh\nexec xcrun --sdk iphoneos clang -target arm64-apple-ios%s -isysroot "%s" "$@"\n' "$deployment" "$sdk_path" > "$xc_bin/cc"
-              printf '#!/bin/sh\nexec xcrun --sdk iphoneos clang++ -target arm64-apple-ios%s -isysroot "%s" "$@"\n' "$deployment" "$sdk_path" > "$xc_bin/cxx"
-              for tool in ar nm; do
-                printf '#!/bin/sh\nexec xcrun --sdk iphoneos %s "$@"\n' "$tool" > "$xc_bin/$tool"
-              done
-              chmod +x "$xc_bin"/*
-              {
-                echo "CC_target=$xc_bin/cc"
-                echo "CXX_target=$xc_bin/cxx"
-                echo "AR_target=$xc_bin/ar"
-                echo "NM_target=$xc_bin/nm"
-                # Host tools stay on the macOS compiler of the runner (see the macOS
-                # cross note above): torque and mksnapshot have to run here.
-                echo "CC_host=cc"
-                echo "CXX_host=c++"
-                # No READELF_target: the Xcode toolchain has no readelf, and a static
-                # build does not reach the rules that would call it.
-                echo "NODE_VERIFY_CXX=$xc_bin/cxx"
-                echo "NODE_VERIFY_LINK_ONLY=1"
-                # What a consumer has to link besides the archives; gode's CMakeLists
-                # uses -framework Foundation for its iOS libnode.
-                echo "NODE_VERIFY_EXTRA_LINK=-framework Foundation"
-              } >> "$GITHUB_ENV"
-              echo "iOS deployment target $deployment, SDK $sdk_path"
-              "$xc_bin/cxx" --version | head -1
+              # through CC_target as a bare string, so the wrappers that bake in the
+              # triple and the SDK path are generated by one script - the same one
+              # tools/test_apple_toolchain.sh checks against a stand-in SDK, so this
+              # step cannot silently drift from what is actually tested.
+              # NODE_VERIFY_LINK_ONLY: the bundle cannot be executed on a macOS runner
+              # if it was built for a device, so the check stops after the link.
+              xflags=()
+              if [ -n "${CARGO_TARGET:-}" ]; then xflags+=(--rust-triple "$CARGO_TARGET"); fi
+              if [ "${NODE_IOS_SIMULATOR:-}" = "true" ]; then xflags+=(--simulator); fi
+              bash "$GITHUB_WORKSPACE/tools/apple_toolchain.sh" \
+                --platform ios --arch "$NODE_ARCH" \
+                --deployment-target "${NODE_IOS_DEPLOYMENT:-16.0}" \
+                ${xflags[@]+"${xflags[@]}"} --out-dir "$RUNNER_TEMP/node-xc-bin" >> "$GITHUB_ENV"
+              echo "NODE_VERIFY_LINK_ONLY=1" >> "$GITHUB_ENV"
+              if [ "${NODE_IOS_SIMULATOR:-}" = "true" ]; then
+                echo "node sdk: $(xcrun --sdk iphonesimulator --show-sdk-version) (simulator)"
+              else
+                echo "node sdk: $(xcrun --sdk iphoneos --show-sdk-version)"
+              fi
+              "$RUNNER_TEMP/node-xc-bin/cxx" --version | head -1
               ;;
           esac
 

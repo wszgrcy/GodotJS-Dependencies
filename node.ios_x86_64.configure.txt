@@ -1,0 +1,38 @@
+# Node.js configure arguments: iOS x86_64 - the iPhone *simulator* (builds libnode for
+# ios.x86_64)
+
+# Why this target exists: Godot builds the iOS simulator with
+#   scons platform=ios arch=x86_64 simulator=yes
+# and the GodotJS module then looks for node_<version>_ios.x86_64.tar.zst, because the
+# module names a bundle after the engine's own platform and architecture names. So the
+# x86_64 iOS bundle is not a device target - real iOS devices have never shipped an x86
+# CPU - it is the simulator build, and without it an engine build for the simulator has
+# no Node to link.
+
+# What makes it a simulator build is not in this file, it is in the toolchain: the
+# compile lines have to say
+#   -target x86_64-apple-ios<version>-simulator   (note the -simulator suffix)
+#   -isysroot <iPhoneSimulator.sdk>
+# and cargo has to be pointed at x86_64-apple-ios-sim. tools/apple_toolchain.sh writes
+# all of that with --platform ios --arch x86_64 --simulator, and
+# tools/test_apple_toolchain.sh checks it against a stand-in SDK on any machine, so
+# this does not have to be discovered again on a macOS runner at 2 a.m.
+
+# Building it with the device SDK instead gets as far as compiling and then fails in the
+# link against libraries the simulator SDK does not carry, which reads like a missing
+# dependency rather than the wrong SDK. If that is the error in front of you, check
+# which SDK the compile lines name before looking at the archives.
+
+# The arguments themselves are the device file's with a different CPU: --dest-os=ios is
+# what makes gyp build a static libnode without a main() (node.gyp excludes
+# node_main.cc for ios, since the embedder owns the process), and --cross-compiling is
+# needed even though the runner is also x86_64, because the build has to run mksnapshot
+# as a macOS program and link a snapshot built for the simulator.
+--ninja
+--dest-os=ios
+--dest-cpu=x64
+--cross-compiling
+--with-intl=full-icu
+--without-node-options
+--without-npm
+--disable-single-executable-application

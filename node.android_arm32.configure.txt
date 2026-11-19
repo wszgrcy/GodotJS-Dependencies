@@ -23,9 +23,21 @@
 # "if options.dest_os == 'android'" line in configure.py), so there is nothing to
 # pass here for the FPU.
 
-# Not verified: GodotJS ships an android.arm32 V8 build today, but nobody has run
-# a Node build for 32-bit Android here. If it fails, this is the first entry to
-# drop - arm64 and x86_64 are the ones that matter.
+# This target is NOT in the build matrix, and it is not a matter of nobody having
+# tried it: V8 refuses to be built for 32-bit ARM from a 64-bit machine. The first V8
+# object compiled with -DV8_TARGET_ARCH_ARM stops at
+#   deps/v8/include/v8config.h: error: Target architecture arm is only supported on
+#   arm and ia32 host
+# which is a check on the machine doing the build, not on the NDK: the arm simulator V8
+# uses to run 32-bit ARM code on the build machine is only built for a host that is
+# itself 32-bit ARM or ia32. An arm64 runner answers to neither (V8_HOST_ARCH_ARM64), so
+# switching the job to an arm64 runner would not help either. Keeping an android arm32
+# Node bundle therefore needs a 32-bit ARM build machine (an armv7 board, or an ia32
+# container); everything in this file is what such a build would pass.
+#
+# Measured on linux/x64 with NDK r29: the build compiles every non-V8 object and then
+# fails with that #error. GodotJS's V8-only android.arm32 bundle is unaffected, because
+# that path does not build V8 for the host toolset the way Node does.
 --ninja
 --dest-os=android
 --dest-cpu=arm

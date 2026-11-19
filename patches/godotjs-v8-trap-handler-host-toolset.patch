@@ -1,7 +1,7 @@
-Let the host toolset of an Android build see V8's POSIX trap handler
+Let an Android build see V8's POSIX trap handler on both toolsets
 
-Building Node 26.13.1 for android/arm64 on linux/x64 gets all the way to linking the
-host tools and then stops:
+Building Node 26.13.1 for android/arm64 on linux/x64 compiles every object and then
+stops while linking the build-time tools:
 
     FAILED: mksnapshot
     .../ld.bfd: obj.host/.../v8_base_without_compiler.api.o: in function
@@ -10,55 +10,74 @@ host tools and then stops:
     .../ld.bfd: ... undefined reference to `v8::internal::trap_handler::RegisterDefaultTrapHandler'
     .../ld.bfd: ... simulator-arm64.cc: undefined reference to `v8_internal_simulator_ProbeMemory'
 
-The host toolset builds V8 for the *target* architecture (arm64 here) and runs it on the
-build machine through V8's own CPU simulator, which is how mksnapshot and the torque
-tools are able to produce arm64 snapshots on an x64 machine. That host build of V8 is
-compiled with wasm enabled, so it references the wasm trap handler, but the pair of
-sources that defines it is only added under this condition in tools/v8_gypfiles/v8.gyp
-(the arm64 section, and the same shape in the x64 section for the simulator sources):
+android/x86_64 on the same machine stops the same way, and for the same reason.
 
-    ['OS in "linux mac ios freebsd openharmony"', { sources: handler-inside-posix.cc,
-                                                    handler-outside-posix.cc }]
+The cause is a missing name in three OS lists in tools/v8_gypfiles/v8.gyp. V8 defines
+its wasm trap handler for posix systems in src/trap-handler/handler-inside-posix.cc and
+handler-outside-posix.cc, and it adds those two files only under conditions that list
+the operating systems it has been built for:
 
-`OS` here is the *target* operating system, and for an Android cross build that is
-"android", which is not in the list - so nothing compiles the handler and the link of
-every host tool fails. The list has "ios" for the analogous case upstream does support:
-cross-building arm64 V8 on a mac, where the host toolset is a mac program. Android's
-host toolset is a posix program too, and handler-inside-posix.cc is what it needs
-(it is the file that defines TryHandleSignal and RegisterDefaultTrapHandler, and
-handler-outside-simulator.cc - also compiled for the host - calls into them).
+    ['OS in "linux mac ios freebsd openharmony"', { sources: [both files] }]
 
-The condition is widened by adding android and, so that a host toolset is never left
-without it whatever the target is, by accepting any `_toolset=="host"` compile. On
-linux/mac hosts - every host this tree builds on - that adds the same two files the OS
-list already added, so nothing that builds today changes.
+`OS` here means the system being built *for*, and an Android build answers "android",
+which none of these lists contain - so nothing compiles the handler and every link that
+refers to it fails. Two of the three lists are in the arm64 section, where the condition
+also asks which toolset is being compiled: the host toolset - the copy of V8 that
+mksnapshot and the torque tools link, built for the target architecture and run on the
+build machine through V8's own CPU simulator - needs the handler exactly as much as the
+target binary does, and it was missing it too. "ios" is in those lists for the analogous
+case upstream supports: cross-building arm64 V8 on a mac, where the host toolset is a
+mac program. An Android host toolset is a posix program for the same purpose, and
+handler-outside-simulator.cc, which the host toolset does compile, calls into the pair.
 
-Found by building android/arm64 with NDK r29 on linux/x64: the build reached
-[4084/6046] with every target object compiled, then failed on mksnapshot as above.
+The third list is in the x64 section and has no toolset test at all, so a build for
+android/x86_64 loses the handler on both toolsets at once.
+
+Every widened list gains the word android and nothing else. On linux, mac and win hosts
+the conditions already matched without it, so no build that works today sees a different
+source list; only an Android target starts compiling the handler, which is what it needs
+the files for.
+
+Measured on linux/x64 with NDK r29: android/arm64 reached [4084/6046] and android/x86_64
+[3809/6039], each with every target object compiled, and each then failed as above; with
+this patch both build, package, and pass verify_node_bundle.sh.
 
 --- a/tools/v8_gypfiles/v8.gyp
 +++ b/tools/v8_gypfiles/v8.gyp
-@@ -1286,7 +1286,12 @@
+@@ -1240,7 +1240,10 @@
+             }],
+             ['v8_enable_webassembly==1', {
+               'conditions': [
+-                ['OS in "linux mac ios freebsd openharmony"', {
++                # "android" here for the same reason as in the arm64 section: an
++                # Android build for x86_64 needs the handler on the target and on the
++                # host toolset, and this is the only list that covers both.
++                ['OS in "linux mac ios freebsd openharmony android"', {
+                   'sources': [
+                     '<(V8_ROOT)/src/trap-handler/handler-inside-posix.cc',
+                     '<(V8_ROOT)/src/trap-handler/handler-outside-posix.cc',
+@@ -1268,7 +1271,12 @@
            'conditions': [
              ['v8_enable_webassembly==1', {
                'conditions': [
 -                ['((_toolset=="host" and host_arch=="arm64" or _toolset=="target" and target_arch=="arm64") and (OS in "linux mac ios openharmony")) or ((_toolset=="host" and host_arch=="x64" or _toolset=="target" and target_arch=="x64") and (OS in "linux mac openharmony"))', {
 +                # "android" joins both OS lists: an Android build needs this pair on both
 +                # toolsets. The target binary uses the handler, and so does the host
-+                # toolset, which builds V8 for arm64 and runs it through the simulator to
-+                # produce the snapshots ("ios" is in the list for the same reason - the
-+                # host toolset there is a mac program).
++                # toolset, which builds V8 for arm64 and runs it through the simulator
++                # to produce the snapshots ("ios" is in the list for the same reason -
++                # the host toolset there is a mac program).
 +                ['((_toolset=="host" and host_arch=="arm64" or _toolset=="target" and target_arch=="arm64") and (OS in "linux mac ios openharmony android")) or ((_toolset=="host" and host_arch=="x64" or _toolset=="target" and target_arch=="x64") and (OS in "linux mac openharmony android"))', {
                    'sources': [
                      '<(V8_ROOT)/src/trap-handler/handler-inside-posix.cc',
                      '<(V8_ROOT)/src/trap-handler/handler-outside-posix.cc',
-@@ -1298,7 +1303,9 @@
+@@ -1280,7 +1288,10 @@
                      '<(V8_ROOT)/src/trap-handler/handler-outside-win.cc',
                    ],
                  }],
 -                ['(_toolset=="host" and host_arch=="x64" or _toolset=="target" and target_arch=="x64") and (OS in "linux mac win openharmony")', {
-+                # Same as above: on an Android cross build this is the host toolset's file,
-+                # and it is what defines v8_internal_simulator_ProbeMemory for the simulator.
++                # Same reason as above: on an Android cross build this is the host
++                # toolset's file, and it defines v8_internal_simulator_ProbeMemory,
++                # which the simulator refers to.
 +                ['(_toolset=="host" and host_arch=="x64" or _toolset=="target" and target_arch=="x64") and (OS in "linux mac win openharmony android")', {
                    'sources': [
                      '<(V8_ROOT)/src/trap-handler/handler-outside-simulator.cc',
