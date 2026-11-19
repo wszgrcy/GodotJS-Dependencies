@@ -276,6 +276,14 @@ jobs:
     uses: ./.github/workflows/build_lws_ios_arm64.yml
     secrets: inherit
 
+  # The iOS simulator runs on Intel Macs (and on Apple Silicon under Rosetta), and
+  # Godot's simulator export builds arch=x86_64, so the debugger bridge needs a
+  # simulator-SDK build of lws next to the device one.
+  lws_ios_x86_64:
+    if: ${{ vars.SKIP_APPLE != 'true' }}
+    uses: ./.github/workflows/build_lws_ios_x86_64.yml
+    secrets: inherit
+
   lws_macos_arm64:
     if: ${{ vars.SKIP_APPLE != 'true' }}
     uses: ./.github/workflows/build_lws_macos_arm64.yml
@@ -323,6 +331,7 @@ jobs:
       - lws_android_arm32
       - lws_android_x86_64
       - lws_ios_arm64
+      - lws_ios_x86_64
       - lws_macos_arm64
       - lws_macos_x86_64
       - lws_windows_arm64
@@ -352,6 +361,7 @@ jobs:
         (needs.lws_android_arm32.result == 'success' || needs.lws_android_arm32.result == 'skipped') &&
         (needs.lws_android_x86_64.result == 'success' || needs.lws_android_x86_64.result == 'skipped') &&
         (needs.lws_ios_arm64.result == 'success' || needs.lws_ios_arm64.result == 'skipped') &&
+        (needs.lws_ios_x86_64.result == 'success' || needs.lws_ios_x86_64.result == 'skipped') &&
         (needs.lws_macos_arm64.result == 'success' || needs.lws_macos_arm64.result == 'skipped') &&
         (needs.lws_macos_x86_64.result == 'success' || needs.lws_macos_x86_64.result == 'skipped') &&
         (needs.lws_windows_arm64.result == 'success' || needs.lws_windows_arm64.result == 'skipped') &&

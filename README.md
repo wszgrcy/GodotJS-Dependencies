@@ -50,13 +50,14 @@ on). A newer clang paired with libstdc++ 12 headers therefore fails deep inside
 `src/heap/cppgc`, half an hour into the build - so the pair is fixed and asserted
 instead of left to whatever the image happens to resolve.
 
-The ten `lws_*` jobs ignore `runtime` and always build. libwebsockets is not a JS
+The eleven `lws_*` jobs ignore `runtime` and always build. libwebsockets is not a JS
 runtime: GodotJS uses it as the WebSocket transport for the debugger connection,
 because Godot's own `modules/websocket` cannot finish the handshake with Chrome
-DevTools (see the `JSB_WITH_LWS` note in GodotJS's `SCsub`). Today that define is
-only turned on when the V8 dependency is present (`lws_support` is derived from
-`v8_support` in `SCsub`), so whether the Node path keeps the debugger transport is
-an engine-side decision; the dependency itself is built either way.
+DevTools (see the `JSB_WITH_LWS` note in GodotJS's `SCsub`). The engine turns that
+define on only when it finds the library under `lws/<platform>_<arch>_release/`, and
+the name it looks for is built out of its own platform and architecture, so a stage
+directory named any other way leaves an engine build without the debugger transport
+and does not fail it.
 
 
 ## V8 versions
@@ -289,6 +290,15 @@ act workflow_dispatch \
 ```sh
 act workflow_dispatch \
   -W .github/workflows/build_lws_ios_arm64.yml \
+  -P macos-latest=-self-hosted \
+  --var HOST_MACOS=true \
+  -j build
+```
+
+- LWS iOS simulator (x86_64)
+```sh
+act workflow_dispatch \
+  -W .github/workflows/build_lws_ios_x86_64.yml \
   -P macos-latest=-self-hosted \
   --var HOST_MACOS=true \
   -j build

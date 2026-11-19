@@ -1,0 +1,122 @@
+name: lws-ios-x86_64
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: Scripts
+
+      - name: Detect act environment
+        run: |
+          if [ -n "${ACT:-}" ]; then echo "IS_ACT=true" >> "$GITHUB_ENV"; else echo "IS_ACT=false" >> "$GITHUB_ENV"; fi
+
+      - name: Ensure CMake available (macOS)
+        run: |
+          set -euo pipefail
+          if ! command -v cmake >/dev/null 2>&1; then
+            if command -v brew >/dev/null 2>&1; then
+              brew update || true
+              brew install cmake || true
+            fi
+          fi
+          if ! command -v cmake >/dev/null 2>&1; then
+            /usr/bin/python3 -m pip install --user cmake
+            echo "PATH=$HOME/Library/Python/3.12/bin:$HOME/.local/bin:$PATH" >> $GITHUB_ENV
+          fi
+
+      - name: Fetch libwebsockets
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          git clone https://libwebsockets.org/repo/libwebsockets
+          cd libwebsockets
+          # Same pin as the iOS device job: v4.3.10 is the last commit before the
+          # pollfd change that broke the MSVC build, and every platform builds the
+          # same source so the debugger bridge behaves the same everywhere.
+          git checkout v4.3.10
+
+      - name: Configure and build lws (iOS Simulator x86_64)
+        run: |
+          set -euo pipefail
+          export SDK_PATH=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          echo "Using iOS Simulator SDK: ${SDK_PATH}"
+          # The triple has to say -simulator. Without it the compiler links against
+          # the device-only libraries, and the same mistake in the Node bundle is
+          # what tools/apple_toolchain.sh guards against. The triple is written out
+          # here rather than left to CMake's sysroot guessing because this build uses
+          # Unix Makefiles, not the Xcode generator.
+          DEPLOYMENT=16.0
+          cd "$GITHUB_WORKSPACE/libwebsockets"
+          rm -rf out && mkdir -p out && cd out
+          cmake \
+            -G "Unix Makefiles" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLWS_WITH_SHARED=OFF \
+            -DLWS_WITH_STATIC=ON \
+            -DLWS_WITH_SSL=0 \
+            -DLWS_WITH_ZLIB=0 \
+            -DLWS_WITH_TESTAPPS=OFF \
+            -DLWS_WITH_MINIMAL_EXAMPLES=OFF \
+            -DLWS_WITHOUT_TESTAPPS=ON \
+            -DLWS_INSTALL_EXAMPLES=OFF \
+            -DINSTALL_LWS_TESTAPPS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT="${SDK_PATH}" \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=${DEPLOYMENT} \
+            -DCMAKE_C_FLAGS="-target x86_64-apple-ios${DEPLOYMENT}-simulator" \
+            -DCMAKE_CXX_FLAGS="-target x86_64-apple-ios${DEPLOYMENT}-simulator" ..
+          cmake --build . --config Release -j$(sysctl -n hw.ncpu || echo 4)
+
+      - name: Check the archive really targets the simulator
+        # A simulator build that was compiled against the device SDK links, runs, and
+        # then fails in the simulator, which is expensive to notice. LC_BUILD_VERSION
+        # says which platform each object was built for: 7 is iOS Simulator, 2 is the
+        # device, so the archive can be checked without running anything.
+        run: |
+          set -euo pipefail
+          LIB=$(cd "$GITHUB_WORKSPACE/libwebsockets/out" && find . -name 'libwebsockets.a' -print -quit)
+          test -n "$LIB" || { echo "libwebsockets.a not found" >&2; exit 1; }
+          LIB_PATH="libwebsockets/out/${LIB#./}"
+          lipo -verify_arch x86_64 "$LIB_PATH"
+          platforms=$(otool -l "$LIB_PATH" | awk '/LC_BUILD_VERSION/{found=1; next} found && /platform/{print $2; found=0}' | sort -u)
+          echo "LC_BUILD_VERSION platforms in the archive: $(echo "$platforms" | tr '\n' ' ')"
+          test -n "$platforms" || { echo "no LC_BUILD_VERSION load command found in $LIB_PATH" >&2; exit 1; }
+          for platform in $platforms; do
+            if [ "$platform" != "7" ]; then
+              echo "the archive carries platform $platform, but 7 (iOS Simulator) was expected" >&2
+              exit 1
+            fi
+          done
+
+      - name: Stage artifact (iOS Simulator x86_64)
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          # The directory name is the one GodotJS/SCsub looks for: platform, "_",
+          # arch, "_", release. A different separator here silently turns the
+          # debugger transport off in the engine build instead of failing it.
+          mkdir -p staging/lws/ios_x86_64_release
+          cp -a libwebsockets/out/include staging/lws/ios_x86_64_release/
+          LWS_LIB_PATH=$(cd libwebsockets/out && find . -name 'libwebsockets.a' -print -quit)
+          if [ -z "$LWS_LIB_PATH" ]; then
+            echo "libwebsockets.a not found" >&2
+            exit 1
+          fi
+          cp "libwebsockets/out/${LWS_LIB_PATH}" staging/lws/ios_x86_64_release/
+
+      - name: Upload lws (ios x86_64 simulator)
+        if: ${{ env.IS_ACT != 'true' || env.ACTIONS_RUNTIME_URL != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt_lws_ios_x86_64
+          path: staging/
