@@ -1088,11 +1088,22 @@ jobs:
           plat_arch="$(basename "${platforms[0]}")"
           plat_arch="${plat_arch%.release}"
           plat_arch="${plat_arch%_release}"
-          # The build directory is macos.arm64.release but windows_x86_64_release,
-          # which gave the release files two different shapes (node_..._macos.arm64
-          # and node_..._windows_x86_64). One shape, so whatever downloads a bundle
-          # can build the name out of platform and architecture alone.
-          plat_arch="${plat_arch//./_}"
+          # package_node.sh names the directory "<platform>.<arch>.release", except on
+          # Windows, where the separator is an underscore (windows_x86_64_release). The
+          # engine builds the name it downloads out of its own platform and arch with a
+          # dot between them (GodotJS/SCsub: jsb_platform + "." + jsb_arch), so the
+          # underscore shape has to be turned into the dot here. Publishing
+          # node_..._windows_x86_64.tar.zst instead leaves the engine asking for
+          # node_..._windows.x86_64.tar.zst and getting a 404; that is measurable on the
+          # published node-26.13.1 release, where macos.arm64 (named before this step
+          # existed) resolves and macos_x86_64 and windows_x86_64 (named by it) do not.
+          # The separator rule has to tell the Windows separator apart from the one in an
+          # architecture name: x86_64 contains an underscore, so only a name with no dot
+          # at all is in the Windows shape.
+          case "$plat_arch" in
+            *.*) : ;;
+            *_*) plat_arch="${plat_arch%%_*}.${plat_arch#*_}" ;;
+          esac
           asset="node_${NODE_VERSION}_${plat_arch}.tar.zst"
           bash Scripts/tools/zstd_tool.sh pack --directory staging --name node \
             --out "$asset" --level "$RELEASE_ZSTD_LEVEL"
