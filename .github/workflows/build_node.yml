@@ -151,21 +151,28 @@ jobs:
             # own arch name - node_<version>_ios.x86_64.tar.zst - which is why the target
             # has to exist. The arguments are the device file's with a different CPU; the
             # simulator lives in the toolchain (-target
-            # x86_64-apple-ios<version>-simulator, the iPhoneSimulator SDK, and cargo's
-            # x86_64-apple-ios-sim), written by tools/apple_toolchain.sh --simulator.
+            # x86_64-apple-ios<version>-simulator and the iPhoneSimulator SDK, written by
+            # tools/apple_toolchain.sh --simulator).
+            # temporal=off: Temporal is Rust, and Rust publishes no standard library for
+            # x86_64-apple-ios-sim - checked in the dist manifests of 1.99.1 and 1.100.0,
+            # where aarch64-apple-ios-sim appears and x86_64-apple-ios-sim does not - so
+            # there is nothing to compile it with here. The device bundle keeps Temporal;
+            # a simulator bundle is missing only that one JS API.
             {"platform": "ios", "arch": "x86_64", "runner": "macos-latest",
-             "cargo_target": "x86_64-apple-ios-sim", "simulator": "true"},
+             "simulator": "true", "temporal": "off"},
           ]
 
           for entry in entries:
               entry.setdefault("cargo_target", "")
+              entry.setdefault("temporal", "on")
 
           only = os.environ.get("ONLY", "").strip()
           if only:
+              available = sorted({entry["platform"] for entry in entries})
               entries = [e for e in entries if e["platform"] == only]
               if not entries:
                   raise SystemExit(
-                      f"only={only}: expected one of linux, macos, windows")
+                      f"only={only}: expected one of {', '.join(available)}")
 
           print(f"entries={json.dumps(entries)}")
           PY
@@ -215,6 +222,16 @@ jobs:
       # iPhoneOS deployment target for the iOS wrappers. Same value gode and
       # moluopro/libnode use for their shipped libnode.
       NODE_IOS_DEPLOYMENT: ${{ vars.NODE_IOS_DEPLOYMENT || '16.0' }}
+      # Rust used to build Temporal (deps/crates). Pinned, because Node links the Rust
+      # static library with the platform's own linker: every symbol std needs has to be
+      # reachable without rustc being asked to add anything. Rust 1.100.0 stopped
+      # importing the Windows WaitOnAddress group through raw-dylib (api-ms-win-core-synch
+      # -l1-2-0, which needs no import library) and now leaves that to the link, which a
+      # foreign build system knows nothing about - mksnapshot.exe then dies with
+      # "unresolved external symbol __imp_WaitOnAddress". The last image that built
+      # Windows green carried 1.99.1, so that is what Temporal is built with; raise the
+      # repository variable once a newer Rust is proven on all four OSes.
+      RUST_TEMPORAL_TOOLCHAIN: ${{ vars.NODE_RUST_TOOLCHAIN }}
 
     steps:
       - uses: actions/checkout@v4
@@ -259,32 +276,63 @@ jobs:
       - name: Rust toolchain for Temporal
         # Temporal (the JS API) is built from deps/crates with cargo, and Node enables
         # it by default; a runner without Rust would otherwise produce a bundle without
-        # it after a one-line warning. prepare_node_build.sh refuses that, so all this
-        # step has to do is show what is installed and, for a cross build, make the
-        # target's standard library available. The static library cargo produces is
-        # compiled, not linked, so cargo needs no linker for the target - just
-        # `rustup target add`.
+        # it after a one-line warning. prepare_node_build.sh refuses that (and checks the
+        # rustc >= 1.86 minimum from BUILDING.md), so all this step has to do is show what
+        # is installed and, for a cross build, make the target's standard library
+        # available. The static library cargo produces is compiled, not linked, so cargo
+        # needs no linker for the target - just `rustup target add`.
+        # The Rust version is not pinned by default: Node's own Windows CI declares 1.88
+        # and has in practice been building against the runner image's rolling stable
+        # (nodejs/node#67589), and the Windows breakage a newer Rust exposes is a missing
+        # import library, fixed by
+        # patches/godotjs-node-crates-win-synchronization.patch - not a reason to hold the
+        # compiler back.
         shell: bash
+        env:
+          TEMPORAL: ${{ matrix.entry.temporal }}
+          CARGO_TARGET: ${{ matrix.entry.cargo_target }}
+          PIN: ${{ env.RUST_TEMPORAL_TOOLCHAIN }}
         run: |
           set -euo pipefail
-          cargo --version
-          rustc --version
-          target="${{ matrix.entry.cargo_target }}"
+          if [ "$TEMPORAL" = "off" ]; then
+            echo "Temporal is off for this target on purpose (no Rust standard library is published for it)."
+            echo "NODE_TEMPORAL=off" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          target="$CARGO_TARGET"
+          toolchain=()
+          if [ -n "$PIN" ]; then
+            # RUSTUP_TOOLCHAIN goes into this step's own environment as well as
+            # $GITHUB_ENV, so the version printed below is the one being used, and the
+            # target is added to the same toolchain the build will run.
+            rustup toolchain install "$PIN" --profile minimal
+            export RUSTUP_TOOLCHAIN="$PIN"
+            echo "RUSTUP_TOOLCHAIN=$PIN" >> "$GITHUB_ENV"
+            toolchain=(--toolchain "$PIN")
+            echo "Temporal is built with the toolchain '$PIN' chosen by NODE_RUST_TOOLCHAIN"
+          else
+            echo "Temporal is built with the runner's own toolchain"
+          fi
           if [ -n "$target" ]; then
-            rustup target add "$target"
+            # ${toolchain[@]+...} rather than "${toolchain[@]}": on macOS the image's
+            # /bin/bash is 3.2, where an empty array under `set -u` counts as unset and
+            # stops the step with "toolchain[@]: unbound variable".
+            rustup target add "$target" ${toolchain[@]+"${toolchain[@]}"}
             echo "CARGO_BUILD_TARGET=$target" >> "$GITHUB_ENV"
             echo "cross build: cargo will build Temporal for $target"
           else
             echo "native build: cargo uses the host target ($(rustc -vV | awk '/^host:/{print $2}'))"
           fi
+          echo "cargo: $(cargo --version), rustc: $(rustc --version)"
 
       - name: Toolchain
         # Runs on the image's bash; this step installs the newer bash the rest of the
         # job then uses, so it has to stay compatible with 3.2.
         shell: bash
         env:
-          # The Apple branches hand this to tools/apple_toolchain.sh as --rust-triple,
-          # so cargo's build scripts and Node's own compile lines use one toolchain.
+          # The Apple branches hand this to Scripts/tools/apple_toolchain.sh as
+          # --rust-triple, so cargo's build scripts and Node's own compile lines use one
+          # toolchain.
           CARGO_TARGET: ${{ matrix.entry.cargo_target }}
           # "true" on the iOS simulator entry: same SDK queries and a triple that ends in
           # -simulator instead of the device's.
@@ -372,7 +420,7 @@ jobs:
                 # ${xflags[@]+...} instead of "${xflags[@]}": the image's /bin/bash is 3.2,
                 # and there an empty array under `set -u` counts as unset, which would stop
                 # the step with "xflags[@]: unbound variable".
-                bash "$GITHUB_WORKSPACE/tools/apple_toolchain.sh" \
+                bash "$GITHUB_WORKSPACE/Scripts/tools/apple_toolchain.sh" \
                   --platform macos --arch "$NODE_ARCH" ${xflags[@]+"${xflags[@]}"} \
                   --out-dir "$RUNNER_TEMP/node-mac-bin" >> "$GITHUB_ENV"
                 echo "cross build $host_arch -> $NODE_ARCH: $(cat "$RUNNER_TEMP/node-mac-bin/cxx")"
@@ -433,8 +481,27 @@ jobs:
               # --target=aarch64-windows-msvc, and gyp's clang-cl hook only appends
               # -m32/-m64, so a cross entry stays on cl.exe (and Node 24+ does not
               # support cl.exe at all) - see the removal note in the matrix.
-              win_host_arch="$(uname -m)"
-              [ "$win_host_arch" = aarch64 ] && win_host_arch=arm64
+              # "Is this the runner's own architecture" cannot be asked with uname -m:
+              # on the Windows-on-ARM runners Git Bash itself runs under emulation and
+              # reports x86_64 on an arm64 machine (measured on windows-11-arm), which
+              # would silently take the cross branch and leave GODOTJS_NODE_CLANG_CL
+              # unset. Visual Studio's environment says it correctly, and this step has
+              # already run vcvarsall by now. It spells the answer the way the Visual
+              # Studio command prompt does - x64 on an x64 runner, arm64 on an arm64
+              # one - so both that spelling and the uname one are accepted.
+              win_host_arch="${VSCMD_ARG_HOST_ARCH:-}"
+              case "$win_host_arch" in
+                aarch64|arm64) win_host_arch=arm64 ;;
+                x64|amd64|x86_64) win_host_arch=x86_64 ;;
+                x86|i686) win_host_arch=i686 ;;
+                *) win_host_arch="" ;;
+              esac
+              if [ -z "$win_host_arch" ]; then
+                win_host_arch="$(uname -m)"
+                [ "$win_host_arch" = aarch64 ] && win_host_arch=arm64
+                echo "VSCMD_ARG_HOST_ARCH is unset; falling back to uname -m ($win_host_arch),"
+                echo "  which is wrong on a Windows-on-ARM runner."
+              fi
               if [ "$NODE_ARCH" = "$win_host_arch" ]; then
                 clang_cl_path="$(command -v clang-cl)"
                 # ninja needs the Windows spelling, and Git Bash may report either one.
@@ -625,13 +692,14 @@ jobs:
               # through CC_target as a bare string, so the wrappers that bake in the
               # triple and the SDK path are generated by one script - the same one
               # tools/test_apple_toolchain.sh checks against a stand-in SDK, so this
-              # step cannot silently drift from what is actually tested.
+              # step cannot silently drift from what is actually tested. The checkout of
+              # this repository in the build job lives under Scripts/, unlike in pick.
               # NODE_VERIFY_LINK_ONLY: the bundle cannot be executed on a macOS runner
               # if it was built for a device, so the check stops after the link.
               xflags=()
               if [ -n "${CARGO_TARGET:-}" ]; then xflags+=(--rust-triple "$CARGO_TARGET"); fi
               if [ "${NODE_IOS_SIMULATOR:-}" = "true" ]; then xflags+=(--simulator); fi
-              bash "$GITHUB_WORKSPACE/tools/apple_toolchain.sh" \
+              bash "$GITHUB_WORKSPACE/Scripts/tools/apple_toolchain.sh" \
                 --platform ios --arch "$NODE_ARCH" \
                 --deployment-target "${NODE_IOS_DEPLOYMENT:-16.0}" \
                 ${xflags[@]+"${xflags[@]}"} --out-dir "$RUNNER_TEMP/node-xc-bin" >> "$GITHUB_ENV"

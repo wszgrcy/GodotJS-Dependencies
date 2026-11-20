@@ -14,7 +14,10 @@
 # The flags are not decoration. Without -target, a build of the same macOS clang is
 # used for the host's architecture; without -isysroot, the SDK's headers and libraries
 # are not found at all. For iOS the deployment target has to be part of the triple
-# (-ios16.0), because -mmacosx-version-min means macOS there.
+# (-ios16.0), because -mmacosx-version-min means macOS there, and iOS also gets
+# -std=gnu++20 and -fno-exceptions in its C++ wrappers, because gyp reads Node's
+# C++ standard from xcode_settings for the mac flavour only - see the comment by
+# cxx_flags below.
 #
 # Options:
 #   --platform ios|macos        which Apple platform the bundle is for
@@ -167,14 +170,36 @@ else
   platform_flags+=( -arch "$apple_arch" )
 fi
 
+# Node does not say which C++ standard to use with a compiler flag: it says it through
+# gyp's xcode_settings (common.gypi, in the mac block: CLANG_CXX_LANGUAGE_STANDARD =
+# gnu++20 and GCC_ENABLE_CPP_EXCEPTIONS = NO), and gyp's ninja generator reads those
+# settings only for the mac flavour (tools/gyp/pylib/gyp/generator/ninja.py, the line
+# `if self.flavor == "mac"`). --dest-os=ios makes the flavour "ios", so no -std= ever
+# reaches the compiler and the first C++ file stops in deps/v8/include/v8config.h with
+# "C++20 or later required." - on the host toolset too, because those settings belong to
+# the target, not to the toolset. The wrappers are the only way in for iOS, so the C++
+# ones carry both flags. macOS needs nothing here: its flavour is mac and gyp adds them.
+cxx_flags=()
+if [ "$platform" = ios ]; then
+  cxx_flags=( -std=gnu++20 -fno-exceptions )
+fi
+
 write_wrapper cc   "$xcrun" --sdk "$sdk_name" clang "${platform_flags[@]}"
-write_wrapper cxx  "$xcrun" --sdk "$sdk_name" clang++ "${platform_flags[@]}"
+write_wrapper cxx  "$xcrun" --sdk "$sdk_name" clang++ "${platform_flags[@]}" ${cxx_flags[@]+"${cxx_flags[@]}"}
 write_wrapper ar   "$xcrun" --sdk "$sdk_name" ar
 write_wrapper nm   "$xcrun" --sdk "$sdk_name" nm
 write_wrapper libtool "$xcrun" --sdk "$sdk_name" libtool
 write_wrapper lipo "$xcrun" --sdk "$sdk_name" lipo
 write_wrapper strip "$xcrun" --sdk "$sdk_name" strip
 write_wrapper otool "$xcrun" --sdk "$sdk_name" otool
+
+# The host toolset keeps the runner's own compiler (it has to produce programs that run
+# here), but on iOS it still needs the C++ standard above, and gyp would call a bare
+# `c++` with nothing in front of it. Same reason as the target wrapper: flags first, so
+# anything gyp adds later still wins.
+if [ "$platform" = ios ]; then
+  write_wrapper host_cxx c++ "${cxx_flags[@]}"
+fi
 
 echo "apple_toolchain: $platform $apple_arch, triple $triple, SDK $sdk_path" >&2
 
@@ -188,8 +213,14 @@ echo "apple_toolchain: $platform $apple_arch, triple $triple, SDK $sdk_path" >&2
   printf 'STRIP=%s\n' "$out_dir/strip"
   # The host toolset - mksnapshot, torque, the programs the build runs on the runner
   # itself - has to be built by the runner's own compiler, or none of them can start.
+  # For iOS that compiler still needs the C++ standard, so it goes through host_cxx,
+  # which only adds those flags and nothing that would aim it at the SDK.
   printf 'CC_host=cc\n'
-  printf 'CXX_host=c++\n'
+  if [ "$platform" = ios ]; then
+    printf 'CXX_host=%s\n' "$out_dir/host_cxx"
+  else
+    printf 'CXX_host=c++\n'
+  fi
   printf 'NODE_VERIFY_CXX=%s\n' "$out_dir/cxx"
   if [ -n "$framework_link" ]; then
     printf 'NODE_VERIFY_EXTRA_LINK=%s\n' "$framework_link"

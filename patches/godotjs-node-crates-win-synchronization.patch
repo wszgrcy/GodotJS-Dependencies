@@ -1,0 +1,39 @@
+Name the Windows library that provides the futex functions the Rust standard library uses
+
+deps/crates is compiled by cargo into node_crates.lib, and Node hands that archive to
+the platform linker like any other static library. The Rust standard library waits on
+an address with WaitOnAddress, WakeByAddressSingle and WakeByAddressAll - MSDN puts
+those three in synchapi.h, provided by Synchronization.lib, served at run time by
+API-MS-Win-Core-Synch-l1-2-0.dll - and nothing in Node's build asks the linker for
+that library. So every link of node_crates.lib (mksnapshot.exe first, then node.exe
+and libnode) ends with
+
+    error LNK2019: unresolved external symbol __imp_WaitOnAddress
+    error LNK2019: unresolved external symbol __imp_WakeByAddressSingle
+    error LNK2019: unresolved external symbol __imp_WakeByAddressAll
+        referenced in file node_crates.lib(std-*.rcgu.o)
+
+Whether you see it depends on the Rust version, which is why a Node version that built
+last week can fail this week with no change of its own: until 1.99 the standard library
+declared those three through a raw-dylib link attribute pointing at
+api-ms-win-core-synch-l1-2-0, which makes the object carry its own import and needs no
+import library; newer Rust declares them as ordinary imports, and then the linker has
+to be told which library to take them from. The `__imp_` prefix in the message above is
+exactly that "ordinary import" spelling.
+
+Naming the library is the fix, and it is the fix upstream chose too: nodejs/node#67590
+("build: add synchronization.lib to crates build on Windows", for issue nodejs/node#67589,
+which is the same failure seen in Node's own Windows CI). That pull request was still
+open when this patch was written, so the change is carried here and can be deleted once
+the upstream one is released.
+
+--- a/deps/crates/crates.gyp
++++ b/deps/crates/crates.gyp
+@@ -81,6 +81,7 @@
+           ['OS=="win"', {
+             'libraries': [
+               '-lntdll',
++              '-lsynchronization',
+               '-luserenv'
+             ],
+           }],

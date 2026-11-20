@@ -79,21 +79,46 @@ jobs:
 
       - name: Check the archive really targets the simulator
         # A simulator build that was compiled against the device SDK links, runs, and
-        # then fails in the simulator, which is expensive to notice. LC_BUILD_VERSION
-        # says which platform each object was built for: 7 is iOS Simulator, 2 is the
-        # device, so the archive can be checked without running anything.
+        # then fails in the simulator, which is expensive to notice. An x86_64 slice
+        # alone cannot tell those apart, so the load commands are the evidence:
+        # LC_BUILD_VERSION says which platform each object was built for, and 7 means
+        # iOS Simulator. otool does not print load commands for archive members on every
+        # release, so the members are extracted and inspected one by one.
         run: |
           set -euo pipefail
           LIB=$(cd "$GITHUB_WORKSPACE/libwebsockets/out" && find . -name 'libwebsockets.a' -print -quit)
           test -n "$LIB" || { echo "libwebsockets.a not found" >&2; exit 1; }
           LIB_PATH="libwebsockets/out/${LIB#./}"
-          lipo -verify_arch x86_64 "$LIB_PATH"
-          platforms=$(otool -l "$LIB_PATH" | awk '/LC_BUILD_VERSION/{found=1; next} found && /platform/{print $2; found=0}' | sort -u)
-          echo "LC_BUILD_VERSION platforms in the archive: $(echo "$platforms" | tr '\n' ' ')"
-          test -n "$platforms" || { echo "no LC_BUILD_VERSION load command found in $LIB_PATH" >&2; exit 1; }
+          # lipo's usage is `lipo <input_file> <command> [<options>]`: the file comes
+          # first, and -verify_arch exits non-zero when the architecture is missing.
+          lipo "$LIB_PATH" -verify_arch x86_64
+          echo "architectures: $(lipo -archs "$LIB_PATH")"
+          members_dir="$(mktemp -d)"
+          trap 'rm -rf "$members_dir"' EXIT
+          ( cd "$members_dir" && ar x "$GITHUB_WORKSPACE/$LIB_PATH" )
+          platforms=""
+          checked=0
+          for member in $(cd "$members_dir" && ls | head -8); do
+            listing="$(otool -l "$members_dir/$member" 2>/dev/null || true)"
+            case "$listing" in
+              *LC_BUILD_VERSION*)
+                checked=$((checked + 1))
+                platform=$(printf '%s\n' "$listing" | awk '/LC_BUILD_VERSION/{found=1; next} found && /platform/{print $2; exit}')
+                platforms="$platforms $platform"
+                ;;
+            esac
+          done
+          platforms=$(printf '%s\n' $platforms | sort -u | tr '\n' ' ')
+          echo "LC_BUILD_VERSION platforms in the archive: $platforms (checked $checked member(s))"
+          if [ "$checked" -eq 0 ]; then
+            echo "no LC_BUILD_VERSION load command found in any member of $LIB_PATH" >&2
+            echo "  cannot tell a simulator build from a device build without it." >&2
+            exit 1
+          fi
           for platform in $platforms; do
             if [ "$platform" != "7" ]; then
               echo "the archive carries platform $platform, but 7 (iOS Simulator) was expected" >&2
+              echo "  the compile triple must end in -simulator; check CMAKE_C_FLAGS above." >&2
               exit 1
             fi
           done

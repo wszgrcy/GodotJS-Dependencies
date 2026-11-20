@@ -53,6 +53,12 @@
 #   NODE_TEMPORAL=off      build without Temporal. Only for a platform whose Rust
 #                          target cannot be built on this machine (for example before
 #                          cargo has an Android NDK linker configured).
+#   NODE_HOST_CPU=x64|arm64
+#                          say what machine this build runs on, for the cases where
+#                          `uname -m` lies: Git Bash on a Windows-on-ARM runner reports
+#                          x86_64 on an arm64 machine. When this is unset, the script
+#                          reads VSCMD_ARG_HOST_ARCH from Visual Studio's environment,
+#                          which names it correctly, and only then falls back to uname.
 
 
 set -euo pipefail
@@ -337,8 +343,20 @@ case "${dest_os:-linux}" in
 esac
 
 # --- what machine is this, and is it a cross build -----------------------------
-host_cpu="$(uname -m)"
-case "$host_cpu" in x86_64|amd64) host_cpu=x64 ;; aarch64|arm64) host_cpu=arm64 ;; esac
+# Answering with uname -m is wrong on a Windows-on-ARM runner: Git Bash runs there under
+# emulation and reports x86_64 on an arm64 machine. Getting this wrong is not cosmetic -
+# a native arm64 build would look like a cross build, and Windows Temporal is refused
+# for a cross build because deps/crates/crates.gyp names the Rust archive after the
+# target architecture, which would collide between the two toolsets.
+host_cpu="${NODE_HOST_CPU:-${VSCMD_ARG_HOST_ARCH:-}}"
+case "$host_cpu" in
+  x64|amd64|x86_64) host_cpu=x64 ;;
+  arm64|aarch64) host_cpu=arm64 ;;
+  *)
+    host_cpu="$(uname -m)"
+    case "$host_cpu" in x86_64|amd64) host_cpu=x64 ;; aarch64|arm64) host_cpu=arm64 ;; esac
+    ;;
+esac
 host_os="$(uname -s)"
 case "$host_os" in
   Linux) host_os=linux ;;
@@ -426,6 +444,8 @@ apply_build_patch "$SCRIPT_DIR/patches/node-66804-single-producer.patch" \
                   "nodejs/node#66804 (single producer for shared generated files)" cross
 apply_build_patch "$SCRIPT_DIR/patches/node-66823-rust-host-target.patch" \
                   "nodejs/node#66823 (per-toolset Rust archives for Temporal cross builds)" cross
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-node-crates-win-synchronization.patch" \
+                  "our crates fix that names Synchronization.lib for the Rust standard library" always
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-clang-cl.patch" \
                   "our gyp hook that lets ninja use clang-cl on Windows" always
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-host-toolset.patch" \

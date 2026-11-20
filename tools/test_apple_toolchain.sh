@@ -16,6 +16,9 @@
 #   - the device and simulator SDKs, and the -simulator suffix in the triple: a
 #     simulator binary built with the device triple links device-only libraries;
 #   - CC_host: the build-time programs (mksnapshot, torque) must run on the runner;
+#   - -std=gnu++20 and -fno-exceptions on iOS only: gyp takes Node's C++ standard from
+#     xcode_settings for the mac flavour, so with --dest-os=ios nothing else in the
+#     build names a C++ standard and V8's own header stops the compile;
 #   - cargo's CC_<target> variables: a -sys crate in the Temporal tree would otherwise
 #     be compiled against the host's SDK;
 #   - argument passthrough, because gyp adds its own flags after these ones.
@@ -123,6 +126,16 @@ is_exec "libtool wrapper" "$d/libtool"
 is_exec "strip wrapper" "$d/strip"
 contains "device triple with deployment target" "$d/cxx" "-target arm64-apple-ios16.0"
 contains "iPhoneOS sysroot" "$d/cxx" "-isysroot $fake_ios"
+# Without these two the compile never gets past v8config.h ("C++20 or later required."),
+# because gyp only turns Node's xcode_settings into flags for the mac flavour.
+contains "iOS C++ names the standard Node asks for" "$d/cxx" "-std=gnu++20"
+contains "iOS C++ is built without exceptions, like the other platforms" "$d/cxx" "-fno-exceptions"
+contains "host C++ goes through a wrapper on iOS" "$tmp/env-ios" "CXX_host=$d/host_cxx"
+is_exec "host cxx wrapper" "$d/host_cxx"
+contains "host C++ gets the same standard" "$d/host_cxx" "-std=gnu++20"
+absent "host C++ stays off the iOS SDK" "$d/host_cxx" "-isysroot"
+absent "host C++ keeps the runner's own platform" "$d/host_cxx" "-target"
+contains "host C stays the runner's plain cc" "$tmp/env-ios" "CC_host=cc"
 
 # Call the wrapper and look at what the real compiler would have been given.
 "$d/cc" -c some.c
@@ -143,6 +156,7 @@ run_case sim --platform ios --arch arm64 --simulator --sdk-path "$fake_sim"
 d="$(outdir_of sim)"
 contains "simulator triple says -simulator" "$d/cxx" "-target arm64-apple-ios16.0-simulator"
 contains "simulator uses the simulator SDK" "$d/cxx" "-isysroot $fake_sim"
+contains "simulator C++ also names the standard" "$d/cxx" "-std=gnu++20"
 
 run_case sim15 --platform ios --arch arm64 --simulator --sdk-path "$fake_sim" \
   --deployment-target 15.0
@@ -180,6 +194,10 @@ d="$(outdir_of macos)"
 contains "macos arch flag" "$d/cxx" "-arch x86_64"
 contains "macos triple names the platform" "$d/cxx" "-target x86_64-apple-macosx"
 absent "macos wrapper does not force a sysroot" "$d/cxx" "-isysroot"
+# The mac flavour is handled by gyp itself, so the wrapper must not duplicate it.
+absent "macos C++ standard comes from gyp, not the wrapper" "$d/cxx" "-std="
+contains "macos host compiler stays plain" "$tmp/env-macos" "CXX_host=c++"
+absent "no host wrapper for macOS" "$tmp/env-macos" "host_cxx"
 absent "no Foundation on macOS" "$tmp/env-macos" "NODE_VERIFY_EXTRA_LINK"
 contains "macos asks xcrun for the macOS SDK" "$d/cc" "--sdk macosx"
 

@@ -19,7 +19,7 @@ standalone bundle carries another would mean two engines to test for no benefit.
 | | `v8_<ver>.zip`, one monolith per platform | `node_<ver>_<platform>.<arch>.zip`, 36 archives + headers |
 |---|---|---|
 | Android | today's default: GodotJS links `libv8_monolith.a` | arm64 and x86_64, cross-built with NDK r29 (`SKIP_ANDROID=true` turns them off); arm32 needs a 32-bit ARM build machine (V8 refuses that cross build), see `node.android_arm32.configure.txt` |
-| iOS | today's default: same | `arm64` against the iPhoneOS SDK, plus `x86_64` for the iPhone simulator: Godot builds the simulator as `arch=x86_64 simulator=yes`, so the bundle carries that name even though no iOS device has an x86 CPU (`SKIP_IOS=true` turns both off). The wrapper compilers come from `tools/apple_toolchain.sh`, and `tools/test_apple_toolchain.sh` checks them on any machine against a stand-in SDK. iOS forbids executable memory, so an embedder must start Node with JIT disabled |
+| iOS | today's default: same | `arm64` against the iPhoneOS SDK, plus `x86_64` for the iPhone simulator: Godot builds the simulator as `arch=x86_64 simulator=yes`, so the bundle carries that name even though no iOS device has an x86 CPU (`SKIP_IOS=true` turns both off). The simulator bundle has no Temporal API: Rust publishes no standard library for `x86_64-apple-ios-sim`, so there is no compiler for it. The wrapper compilers come from `tools/apple_toolchain.sh`, and `tools/test_apple_toolchain.sh` checks them on any machine against a stand-in SDK. iOS forbids executable memory, so an embedder must start Node with JIT disabled |
 | Linux, macOS, Windows | still usable, and what the engine links today | Linux x86_64 and arm64, macOS arm64 plus x86_64 (cross-built on the arm64 runner), Windows x86_64 and arm64 (GitHub's arm64 Windows runner); `SKIP_WINDOWS=true` / `SKIP_APPLE=true` turn them off |
 | Web export | not needed | not needed: GodotJS's web bridge (`impl/web`) runs inside the browser's own JavaScript engine |
 
@@ -196,6 +196,67 @@ The Linux x86_64 build of 15.7.112.12 was verified locally with ICU on:
 `libv8_monolith.a` links with plain `g++ -std=c++20 ... -lv8_monolith -latomic`, and
 the resulting program runs JavaScript, `Intl.NumberFormat`, `toLocaleDateString`
 and a `\p{Script=Han}` regex. See [docs/v8-15.md](docs/v8-15.md).
+
+## iOS: why the C++ standard has to come from the compiler wrapper
+
+`--dest-os=ios` gives gyp the `ios` flavour, and gyp's ninja generator only turns
+`xcode_settings` into compiler flags for the `mac` flavour
+(`tools/gyp/pylib/gyp/generator/ninja.py`, the line `if self.flavor == "mac"`). Node
+puts its C++ standard and its exception setting in exactly those settings
+(`common.gypi`: `CLANG_CXX_LANGUAGE_STANDARD = gnu++20`,
+`GCC_ENABLE_CPP_EXCEPTIONS = NO`), so an iOS build reaches the compiler with no `-std=`
+at all and the first C++ file ends at `deps/v8/include/v8config.h`:
+`"C++20 or later required."` - on the host toolset too, because those settings belong
+to the target rather than to a toolset. `tools/apple_toolchain.sh` therefore bakes
+`-std=gnu++20 -fno-exceptions` into the C++ wrappers it writes for iOS: one for the
+target and a `host_cxx` for the build-time programs, which have to stay macOS binaries.
+`tools/test_apple_toolchain.sh` checks all of it on any machine, without Xcode.
+
+## Rust and Temporal: which version, and what it costs on Windows
+
+Node 26 turned V8's Temporal support on, and that implementation is Rust
+(`deps/crates`), so every platform now carries a `node_crates` static library
+compiled by cargo and then handed to the platform linker like any other archive.
+
+**Version.** Node only sets a floor: rustc and cargo >= 1.86, LLVM >= 19
+(`BUILDING.md`, "Building Node.js with Temporal support"), and
+`deps/crates/Cargo.toml` repeats it as `rust-version = "1.86"`. There is no
+`rust-toolchain` file in Node, so nothing in the source asks for a particular
+release. Node's own Windows workflow declares `RUSTC_VERSION: '1.88'`, but as the
+author of nodejs/node#67589 notes that `rustup override set` has been failing
+quietly for a long time, so upstream has really been building against whatever
+stable the runner image carries. This repository does the same: the runner's Rust
+is used, and the repository variable `NODE_RUST_TOOLCHAIN` can name a version (for
+example `1.88`, to match what Node declares) if you ever need to reproduce a build.
+
+**What a newer Rust costs on Windows.** Because the archive is linked by
+`link.exe` and not by rustc, every symbol the Rust standard library references has
+to be findable through an import library. `WaitOnAddress`, `WakeByAddressSingle`
+and `WakeByAddressAll` - what std waits on an address with - live in
+`Synchronization.lib` (MSDN: header `synchapi.h`, served by
+`API-MS-Win-Core-Synch-l1-2-0.dll`), and Node never named it. Up to Rust 1.99 std
+declared them through a raw-dylib link attribute, which needs no import library,
+so nothing was missing; newer Rust declares them as ordinary imports, and every
+link of `node_crates.lib` then fails - `mksnapshot.exe` is the first, and the
+message is
+
+```text
+error LNK2019: unresolved external symbol __imp_WakeByAddressSingle
+    referenced in file node_crates.lib(std-*.rcgu.o)
+```
+
+The fix is to name the library, not to hold the compiler back:
+`patches/godotjs-node-crates-win-synchronization.patch` adds `-lsynchronization`
+to the Windows `link_settings` of `deps/crates/crates.gyp`, which is also what
+nodejs/node#67590 does for nodejs/node#67589. Delete the patch once that upstream
+change is in a release.
+
+**One platform without Temporal.** The iOS simulator builds with
+`NODE_TEMPORAL=off`, because Rust publishes no standard library for
+`x86_64-apple-ios-sim` - the 1.99.1 and 1.100.0 dist manifests list the arm64
+simulator but not that triple - so there is no rustc that can compile Temporal for
+it. The device bundle keeps Temporal; only the simulator bundle lacks that one JS
+API.
 
 ## Windows needs V8 15.7.112.1 or newer, plus `v8_use_metagen = false`
 

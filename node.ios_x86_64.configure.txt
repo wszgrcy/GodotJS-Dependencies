@@ -13,10 +13,16 @@
 # compile lines have to say
 #   -target x86_64-apple-ios<version>-simulator   (note the -simulator suffix)
 #   -isysroot <iPhoneSimulator.sdk>
-# and cargo has to be pointed at x86_64-apple-ios-sim. tools/apple_toolchain.sh writes
-# all of that with --platform ios --arch x86_64 --simulator, and
-# tools/test_apple_toolchain.sh checks it against a stand-in SDK on any machine, so
-# this does not have to be discovered again on a macOS runner at 2 a.m.
+# Scripts/tools/apple_toolchain.sh writes all of that with
+# --platform ios --arch x86_64 --simulator, and tools/test_apple_toolchain.sh checks it
+# against a stand-in SDK on any machine, so this does not have to be discovered again on
+# a macOS runner at 2 a.m.
+
+# This bundle is built without the Temporal JavaScript API (the job sets
+# NODE_TEMPORAL=off). Temporal is Rust, and Rust publishes no standard library for
+# x86_64-apple-ios-sim - the dist manifests of 1.99.1 and 1.100.0 list
+# aarch64-apple-ios-sim but not x86_64-apple-ios-sim - so there is no rustc that can
+# compile it for this target. The device bundle keeps Temporal.
 
 # Building it with the device SDK instead gets as far as compiling and then fails in the
 # link against libraries the simulator SDK does not carry, which reads like a missing
