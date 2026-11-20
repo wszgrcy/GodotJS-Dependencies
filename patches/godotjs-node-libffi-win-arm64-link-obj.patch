@@ -1,0 +1,36 @@
+From: godotjs
+Subject: [godotjs] libffi: put win64_armasm.obj on the link of everything that links libffi
+
+Windows/arm64 builds libffi's assembly by assembling src/aarch64/win64_armasm.S into
+a standalone object and naming that object in the libffi target's own `libraries`.
+libffi is a static library, so nothing ever links it and the entry is never used: the
+three symbols win64_armasm.S exports - ffi_call_SYSV, ffi_closure_SYSV,
+ffi_closure_SYSV_V, all called from src/aarch64/ffi.c - stay undefined, and the
+first binary to link libffi.lib stops at its link step (node_mksnapshot.exe:
+error LNK2019 three times, then LNK1120). Every other platform gets those symbols
+inside the archive, because there sysv.S is one of libffi's sources.
+
+Repeat the entry under link_settings, which gyp merges into the link line of every
+dependent - the same route deps/crates/crates.gyp already uses to reach those
+binaries. Windows/arm64 only, and the object is still named where it was, so nothing
+that saw it before stops seeing it.
+diff --git a/deps/libffi/libffi.gyp b/deps/libffi/libffi.gyp
+index f3122a4..a670268 100644
+--- a/deps/libffi/libffi.gyp
++++ b/deps/libffi/libffi.gyp
+@@ -313,6 +313,15 @@
+           'libraries': [
+             '<(INTERMEDIATE_DIR)/win64_armasm.obj',
+           ],
++          # The block above only reaches a link of libffi itself, and a static
++          # library is never linked, so dependents never saw the object and stopped
++          # with unresolved ffi_call_SYSV / ffi_closure_SYSV / ffi_closure_SYSV_V.
++          # link_settings is the block gyp hands to the dependents' link lines.
++          'link_settings': {
++            'libraries': [
++              '<(INTERMEDIATE_DIR)/win64_armasm.obj',
++            ],
++          },
+           'actions': [
+             {
+               'action_name': 'assemble_win64_arm_asm',

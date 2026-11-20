@@ -197,6 +197,30 @@ The Linux x86_64 build of 15.7.112.12 was verified locally with ICU on:
 the resulting program runs JavaScript, `Intl.NumberFormat`, `toLocaleDateString`
 and a `\p{Script=Han}` regex. See [docs/v8-15.md](docs/v8-15.md).
 
+## Windows on ARM
+
+Two things on the arm64 Windows runner behaved differently from every other platform,
+and neither failed loudly:
+
+- **The shell reports the wrong architecture.** `uname -m` on the Windows-on-ARM
+  runner says `x86_64` while the machine is arm64, so a native build looks like a
+  cross build. Two decisions depend on that: the workflow's choice of whether
+  clang-cl may be handed over, and `prepare_node_build.sh`'s decision about Temporal,
+  which is refused in a Windows cross build because `deps/crates/crates.gyp` names
+  the Rust archive after the target architecture and a host build would collide with
+  it. Both ask Visual Studio instead: `VSCMD_ARG_HOST_ARCH`, published by the Visual
+  Studio step for the whole job, spells the answer `x64` or `arm64`. `uname -m` stays
+  as a fallback and says out loud when it is used, and `NODE_HOST_CPU` overrides both.
+- **libffi's assembly never reached a link.** Windows/arm64 assembles
+  `src/aarch64/win64_armasm.S` into a standalone object and names it in the libffi
+  target's own `libraries` - but libffi is a static library, so that link line is
+  never used, and `node_mksnapshot.exe` stopped with three unresolved symbols
+  (`ffi_call_SYSV` and the two closure entry points). Other platforms get those
+  symbols inside the archive, because there `sysv.S` is one of libffi's sources.
+  `patches/godotjs-node-libffi-win-arm64-link-obj.patch` repeats the entry under
+  `link_settings`, the block gyp hands to the link of everything that depends on
+  libffi.
+
 ## iOS: why the C++ standard has to come from the compiler wrapper
 
 `--dest-os=ios` gives gyp the `ios` flavour, and gyp's ninja generator only turns
@@ -211,6 +235,24 @@ to the target rather than to a toolset. `tools/apple_toolchain.sh` therefore bak
 `-std=gnu++20 -fno-exceptions` into the C++ wrappers it writes for iOS: one for the
 target and a `host_cxx` for the build-time programs, which have to stay macOS binaries.
 `tools/test_apple_toolchain.sh` checks all of it on any machine, without Xcode.
+
+Links needed the same treatment. abseil calls CoreFoundation (`CFTimeZoneCopyDefault`
+and friends from its time-zone lookup) and the `node_js2c` host tool needs
+CoreFoundation and Security, and both were named only where gyp reads flags for a
+mac-flavour build - so the first binary to link abseil, the host tool `torque`,
+stopped with "Undefined symbols for architecture arm64". `patches/
+godotjs-node-abseil-ios-corefoundation.patch` and
+`patches/godotjs-node-js2c-ios-frameworks.patch` name those frameworks in a form every
+flavour reads; a macOS build gains at most a repeated `-framework`, which the linker
+folds into one.
+
+Two smaller facts from the same run, so nobody rediscovers them: `rustup target add
+x86_64-apple-ios-sim` must not be attempted at all, because stable Rust publishes no
+standard library for that triple (neither the 1.99.1 nor the 1.100.0 manifest has
+one; `aarch64-apple-ios-sim` does exist) - the job skips it and sets `NODE_TEMPORAL=off`
+instead, and the device bundle keeps Temporal. And the build job checks this
+repository out under `Scripts/`, so the wrapper script is `Scripts/tools/
+apple_toolchain.sh` there; only the `pick` job uses the default path.
 
 ## Rust and Temporal: which version, and what it costs on Windows
 

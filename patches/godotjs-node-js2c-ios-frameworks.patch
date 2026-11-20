@@ -1,0 +1,26 @@
+From: godotjs
+Subject: [godotjs] node_js2c: give the iOS build the frameworks its objects need
+
+node_js2c runs on the build machine, and on macOS its link needs CoreFoundation and
+Security - the condition said OS=="mac", while an iOS build reports the destination
+OS everywhere, so the frameworks were dropped and the tool's link came up short.
+Same reason as the abseil patch: an Apple host link needs Apple frameworks no matter
+which Apple product is being built.
+diff --git a/node.gyp b/node.gyp
+index 7ae1d3a..fa1bc41 100644
+--- a/node.gyp
++++ b/node.gyp
+@@ -1673,7 +1673,12 @@
+         'src/builtin_info.cc',
+       ],
+       'conditions': [
+-        [ 'OS=="mac"', {
++        [ 'OS in "mac ios"', {
++          # This tool runs on the build machine and links objects that call into
++          # CoreFoundation and Security (V8's code-signing cache and time-zone lookup,
++          # among them) whichever product is being produced. The destination OS for an
++          # iOS build is ios, so an ios-only or mac-only spelling left the link short
++          # of both frameworks.
+           'libraries': [ '-framework CoreFoundation -framework Security' ],
+         }],
+         [ 'node_shared_simdutf=="false" and node_use_bundled_v8!="false"', {

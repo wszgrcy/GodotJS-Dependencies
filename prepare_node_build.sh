@@ -446,6 +446,12 @@ apply_build_patch "$SCRIPT_DIR/patches/node-66823-rust-host-target.patch" \
                   "nodejs/node#66823 (per-toolset Rust archives for Temporal cross builds)" cross
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-node-crates-win-synchronization.patch" \
                   "our crates fix that names Synchronization.lib for the Rust standard library" always
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-node-libffi-win-arm64-link-obj.patch" \
+                  "our libffi fix that puts the Windows/arm64 assembly object where dependents link it" always
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-node-abseil-ios-corefoundation.patch" \
+                  "our abseil fix that names CoreFoundation for an iOS build" always
+apply_build_patch "$SCRIPT_DIR/patches/godotjs-node-js2c-ios-frameworks.patch" \
+                  "our js2c fix that names the frameworks its objects need on an iOS build" always
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-clang-cl.patch" \
                   "our gyp hook that lets ninja use clang-cl on Windows" always
 apply_build_patch "$SCRIPT_DIR/patches/godotjs-gyp-win-host-toolset.patch" \
