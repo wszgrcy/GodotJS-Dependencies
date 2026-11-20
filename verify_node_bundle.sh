@@ -146,7 +146,7 @@ done
 echo "verify_node_bundle: link.txt:"
 sed 's/^/    /' "$PLATFORM_DIR/link.txt"
 echo "verify_node_bundle: link line built from it (${#LINK_ARGS[@]} arguments):"
-printf '    %s\n' "${LINK_ARGS[@]}"
+printf '    %s\n' ${LINK_ARGS[@]+"${LINK_ARGS[@]}"}
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-verify.XXXXXX")"
 # NODE_VERIFY_KEEP=1 leaves the compiled probe behind, so it can be re-run under
@@ -172,7 +172,7 @@ echo "verify_node_bundle: compiling the probe with $cxx (C++20, RTTI on, excepti
   "${CPPFLAGS_EXTRA[@]+"${CPPFLAGS_EXTRA[@]}"}" \
   "$SCRIPT_DIR/tools/node_link_probe.cc" \
   -o "$WORK/node_link_probe" \
-  "${LINK_ARGS[@]}" ${NODE_VERIFY_EXTRA_LINK:-} "$@"
+  ${LINK_ARGS[@]+"${LINK_ARGS[@]}"} ${NODE_VERIFY_EXTRA_LINK:-} "$@"
 
 if [ -n "${NODE_VERIFY_LINK_ONLY:-}" ]; then
   echo "verify_node_bundle: PASS - $LIBDIR archives compile and link with $cxx"

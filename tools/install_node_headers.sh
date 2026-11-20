@@ -49,12 +49,15 @@ fi
 # rewrites a bare "/" argument into a drive letter, which produced
 # "...\staging\nodeC:" and died in os.makedirs. An empty prefix is the same thing
 # semantically here and is not something the shell rewrites.
+# ${install_args[@]+...} rather than ${install_args[@]}: on the macOS runners /bin/bash
+# is 3.2, and there `set -u` reads an empty array expansion as an unbound variable and
+# stops the script. Non-Windows platforms leave the array empty.
 (
   cd "$NODE_SRC" &&
   python3 tools/install.py install --headers-only \
     --dest-dir "$NODE_DIR" --prefix '' \
     --root-dir "$NODE_SRC" --build-dir "$NODE_OUT" \
-    --config-gypi-path "$NODE_SRC/config.gypi" "${install_args[@]}"
+    --config-gypi-path "$NODE_SRC/config.gypi" ${install_args[@]+"${install_args[@]}"}
 ) >/dev/null
 
 for header in node.h v8.h uv.h; do

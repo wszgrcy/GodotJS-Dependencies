@@ -219,7 +219,13 @@ and neither failed loudly:
   symbols inside the archive, because there `sysv.S` is one of libffi's sources.
   `patches/godotjs-node-libffi-win-arm64-link-obj.patch` repeats the entry under
   `link_settings`, the block gyp hands to the link of everything that depends on
-  libffi.
+  libffi, and moves the object to the generated-sources directory: a path handed over
+  through `link_settings` is resolved in the depending target's own directories, so
+  with `INTERMEDIATE_DIR` the linker asked for
+  `obj/node_mksnapshot.gen/win64_armasm.obj`, where nothing is ever written.
+  `SHARED_INTERMEDIATE_DIR` is the one directory every target of a toolset agrees on,
+  and host and target toolsets each have their own - which is right here, because a
+  cross build's host tool links the host libffi.
 
 ## iOS: why the C++ standard has to come from the compiler wrapper
 
@@ -245,6 +251,15 @@ godotjs-node-abseil-ios-corefoundation.patch` and
 `patches/godotjs-node-js2c-ios-frameworks.patch` name those frameworks in a form every
 flavour reads; a macOS build gains at most a repeated `-framework`, which the linker
 folds into one.
+
+Shell scripts that run on the Apple runners have a trap of their own: an empty array
+expansion (`"${args[@]}"` when nothing was appended) under `set -u` counts as an
+unbound variable in bash 3.2 and stops the step. `install_node_headers.sh` builds
+`install_args` with no element on anything but Windows, and that stopped both iOS
+entries - while the macOS entries got through the same line, so the two runner images
+cannot be assumed to hand the same bash to a script. Writing the expansion as
+`${args[@]+"${args[@]}"}` is correct on both, which is why every array expansion in
+this repository's scripts now reads that way.
 
 Two smaller facts from the same run, so nobody rediscovers them: `rustup target add
 x86_64-apple-ios-sim` must not be attempted at all, because stable Rust publishes no

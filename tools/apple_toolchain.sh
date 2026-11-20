@@ -198,7 +198,7 @@ write_wrapper otool "$xcrun" --sdk "$sdk_name" otool
 # `c++` with nothing in front of it. Same reason as the target wrapper: flags first, so
 # anything gyp adds later still wins.
 if [ "$platform" = ios ]; then
-  write_wrapper host_cxx c++ "${cxx_flags[@]}"
+  write_wrapper host_cxx c++ ${cxx_flags[@]+"${cxx_flags[@]}"}
 fi
 
 echo "apple_toolchain: $platform $apple_arch, triple $triple, SDK $sdk_path" >&2

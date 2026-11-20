@@ -203,11 +203,11 @@ for candidate in "$repo"/node.*.configure.txt; do
   case "$name" in
     windows_*) probe_args+=("--clang-cl=19.1.5") ;;
   esac
-  if ( cd "$build" && python3 ./configure "${probe_args[@]}" --help > /dev/null 2>&1 ); then
+  if ( cd "$build" && python3 ./configure ${probe_args[@]+"${probe_args[@]}"} --help > /dev/null 2>&1 ); then
     echo "local_node_job_check: arguments parse for $name"
   else
     echo "local_node_job_check: configure rejects the arguments for $name"
-    ( cd "$build" && python3 ./configure "${probe_args[@]}" --help 2>&1 | tail -2 )
+    ( cd "$build" && python3 ./configure ${probe_args[@]+"${probe_args[@]}"} --help 2>&1 | tail -2 )
     exit 1
   fi
 done
@@ -219,8 +219,8 @@ if [ "$reuse_build" -eq 0 ]; then
     while IFS= read -r node_arg; do
       node_args+=("$node_arg")
     done < <(flags "$build/args.txt")
-    printf 'configure %s\n' "${node_args[*]}"
-    python3 ./configure "${node_args[@]}"
+    printf 'configure %s\n' "${node_args[*]+${node_args[*]}}"
+    python3 ./configure ${node_args[@]+"${node_args[@]}"}
     ninja -C out/Release node
   )
   echo "local_node_job_check: ninja finished in $(( $(date +%s) - started ))s"
