@@ -1,8 +1,8 @@
 # Node.js configure arguments: iOS arm64 (builds libnode for ios.arm64)
 
-# This one is code-complete but never compiled. Three concrete obstacles were found
-# by reading Node 26's own build machinery and gode's shipped library layout; each
-# is stated with the file it comes from so the next person does not re-derive them.
+# Obstacles found by reading Node 26's own build machinery, and one that only showed
+# up once this was actually built; each is stated with the file it comes from so the
+# next person does not re-derive them.
 #
 #   1. gyp has no "ios" flavour. Node passes --dest-os straight through as gyp's
 #      flavour (configure.py, near the end: flavor_params['flavor'] = options.dest_os),
@@ -22,6 +22,15 @@
 #      record for you. gode links its iOS libnode with -framework Foundation
 #      (gode CMakeLists, the ios branch), which is what link.txt has to end up with.
 #
+#   4. Node ships no OpenSSL assembly for iOS. deps/openssl/config/archs/ only holds
+#      linux-*, darwin*, BSD-*, VC-WIN* and friends, and deps/openssl/openssl_asm.gypi
+#      picks a directory from a condition list keyed on OS and target_arch - nothing
+#      there matches OS=="ios", so the last branch wins (it is commented "Other
+#      architectures don't use assembly" and then includes config/archs/linux-x86_64),
+#      and Linux .s files cannot be assembled for a Mach-O target: "unknown directive",
+#      "invalid alignment value". --openssl-no-asm is the only supported way out, and
+#      it costs portable-C crypto - the same trade the Android builds make.
+#
 # Third-party proof that this is reachable: moluopro/libnode publishes ios/arm64
 # libnode.a (and android/arm64) and gode 2.4.8 ships both in its plugin. Their
 # build scripts live in a private Node fork (moluopro/nodejs), so the arguments
@@ -36,6 +45,7 @@
 --dest-os=ios
 --dest-cpu=arm64
 --cross-compiling
+--openssl-no-asm
 --with-intl=full-icu
 --without-node-options
 --without-npm

@@ -4,41 +4,36 @@ Subject: [godotjs] abseil: link CoreFoundation on the iOS build as well
 Anything that links abseil needs CoreFoundation: absl::time_internal::local_time_zone
 calls CFTimeZoneCopyDefault, CFStringGetCString and friends. The only place that
 framework was named is xcode_settings.OTHER_LDFLAGS, and gyp's ninja generator turns
-xcode_settings into flags for the mac flavour only (`if self.flavor == "mac"` in
-tools/gyp/pylib/gyp/generator/ninja.py). With --dest-os=ios the flavour is ios, so
-the framework was never passed and the first binary to link abseil stopped:
+xcode_settings into flags for the mac flavour only (tools/gyp/pylib/gyp/generator/
+ninja.py: `if self.flavor == "mac"`). With --dest-os=ios the flavour is ios, so the
+framework was never passed and the first binary to link abseil stopped:
 
   Undefined symbols for architecture arm64:
     "_CFTimeZoneCopyDefault", referenced from:
         absl::time_internal::cctz::local_time_zone() in libabseil.a[108](...)
 
-List the framework the way every flavour reads it (`libraries`), for both spellings
-of an Apple host: the iOS build's host tools - torque is the first one linked - are
-macOS executables, and depending on the toolset they report the host OS or the
-destination OS. Naming a framework twice on a link line is the same framework, so
-macOS builds only repeat what xcode_settings already added.
+Naming the framework under libraries reaches every flavour, and only iOS is added -
+macOS keeps getting it from xcode_settings, so macOS link lines do not change at all.
+An iOS build's host tools report OS=="ios" the same way its target does, which is what
+puts the framework on torque's link line too; that was read back out of the generated
+files (out/Release/obj.host/tools/v8_gypfiles/torque.ninja) rather than assumed.
 diff --git a/tools/v8_gypfiles/abseil.gyp b/tools/v8_gypfiles/abseil.gyp
-index 1a1de33..acc05fa 100644
+index 1a1de33..8eed247 100644
 --- a/tools/v8_gypfiles/abseil.gyp
 +++ b/tools/v8_gypfiles/abseil.gyp
-@@ -15,6 +15,25 @@
+@@ -15,6 +15,20 @@
          'xcode_settings': {
            'OTHER_LDFLAGS': ['-framework CoreFoundation'],
          },
-+        # Linking abseil needs CoreFoundation (absl::time_internal::cctz::local_time_zone
-+        # calls CFTimeZoneCopyDefault and friends). The xcode_settings line above only
-+        # reaches the linker for the mac flavour, so an iOS build stopped with
-+        # "Undefined symbols: _CFTimeZoneCopyDefault, _CFStringGetCString, ...".
-+        # Both spellings are listed on purpose: the iOS build's host tools (torque
-+        # first) are macOS executables and may report the host OS or the destination
-+        # OS depending on the toolset, and a framework named twice on a link line is
-+        # the same framework. macOS command lines only gain a repeat of what
-+        # xcode_settings already added.
-+        'conditions': [
-+          [ 'OS in "mac ios"', {
-+            'libraries': [ '-framework CoreFoundation' ],
-+          }],
-+        ],
++        # Linking abseil needs CoreFoundation: absl::time_internal::cctz::local_time_zone
++        # calls CFTimeZoneCopyDefault, CFStringGetCString and friends. The line above only
++        # reaches the linker for gyp's mac flavour (its ninja generator guards the whole
++        # xcode_settings path with `if self.flavor == "mac"`), so an iOS build - flavour
++        # ios - linked abseil without the framework and stopped with "Undefined symbols
++        # for architecture arm64: _CFTimeZoneCopyDefault, ...". Naming the framework under
++        # libraries is read by every flavour, and an iOS build's host tools report
++        # OS=="ios" too, so the build-time programs (torque first) are covered by this as
++        # well.
 +        'conditions': [
 +          [ 'OS=="ios"', {
 +            'libraries': [ '-framework CoreFoundation' ],

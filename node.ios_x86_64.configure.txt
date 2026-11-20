@@ -34,10 +34,15 @@
 # node_main.cc for ios, since the embedder owns the process), and --cross-compiling is
 # needed even though the runner is also x86_64, because the build has to run mksnapshot
 # as a macOS program and link a snapshot built for the simulator.
+
+# --openssl-no-asm is here for the same reason the device file gives: no OpenSSL
+# assembly exists for iOS, and the fallback in deps/openssl/openssl_asm.gypi hands out
+# the Linux .s files, which this target's assembler rejects.
 --ninja
 --dest-os=ios
 --dest-cpu=x64
 --cross-compiling
+--openssl-no-asm
 --with-intl=full-icu
 --without-node-options
 --without-npm

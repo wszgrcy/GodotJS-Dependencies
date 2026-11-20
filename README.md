@@ -223,9 +223,9 @@ and neither failed loudly:
   through `link_settings` is resolved in the depending target's own directories, so
   with `INTERMEDIATE_DIR` the linker asked for
   `obj/node_mksnapshot.gen/win64_armasm.obj`, where nothing is ever written.
-  `SHARED_INTERMEDIATE_DIR` is the one directory every target of a toolset agrees on,
-  and host and target toolsets each have their own - which is right here, because a
-  cross build's host tool links the host libffi.
+  `SHARED_INTERMEDIATE_DIR` is `PRODUCT_DIR/gen` for the whole build
+  (`tools/gyp/pylib/gyp/generator/ninja.py`), so the action's output, libffi's own entry
+  and the `link_settings` entry all name the same file.
 
 ## iOS: why the C++ standard has to come from the compiler wrapper
 
@@ -248,9 +248,34 @@ CoreFoundation and Security, and both were named only where gyp reads flags for 
 mac-flavour build - so the first binary to link abseil, the host tool `torque`,
 stopped with "Undefined symbols for architecture arm64". `patches/
 godotjs-node-abseil-ios-corefoundation.patch` and
-`patches/godotjs-node-js2c-ios-frameworks.patch` name those frameworks in a form every
-flavour reads; a macOS build gains at most a repeated `-framework`, which the linker
-folds into one.
+`patches/godotjs-node-js2c-ios-frameworks.patch` name those frameworks under
+`libraries` for `OS=="ios"` only, so macOS command lines are untouched. Whether that
+also covers the build-time programs was read off the generated build rather than
+guessed: after `./configure --dest-os=ios`, the files
+`out/Release/obj.host/tools/v8_gypfiles/torque.ninja` and `mksnapshot.ninja` say
+`libs = -framework CoreFoundation`, so an iOS build's host tools report `OS=="ios"` too,
+and `node_js2c` gets `-framework CoreFoundation -framework Security`.
+
+OpenSSL on iOS has to be built without its hand-written assembly (`--openssl-no-asm`, in
+both iOS argument files). `deps/openssl/config/archs/` carries configurations for linux,
+darwin, BSD and Windows only - there is no iOS one - and `deps/openssl/openssl_asm.gypi`
+walks a condition list keyed on `OS` and `target_arch` with nothing matching
+`OS=="ios"`, so the final branch wins. It is commented "Other architectures don't use
+assembly" and then includes `config/archs/linux-x86_64`, which is why an iOS build died
+inside Linux `.s` files with "unknown directive" and "invalid alignment value" instead
+of saying anything about OpenSSL. Generating the iOS build with `--openssl-no-asm` leaves
+no assembly rules behind and takes its headers from `archs/linux-x86_64/no-asm/`; the
+Android builds have used that configuration on arm64 all along, so the portable-C crypto
+it produces is a known quantity. The cost is real: iOS and Android get no
+AES-NI-style acceleration, and changing that means adding an OpenSSL configuration for
+the platform, not flipping a flag.
+
+A cross-built bundle check also has to know where ninja writes archives: not next to
+the executable. `libnode.a` lands in `out/Release/obj/libnode.a` and
+`libv8_base_without_compiler.a` under `out/Release/obj/tools/v8_gypfiles/`, so a check
+naming `out/Release/libnode.a` reports a missing archive after a complete build. The
+workflow now looks them up by name under `out/Release`, the way `package_node.sh`
+already does.
 
 Shell scripts that run on the Apple runners have a trap of their own: an empty array
 expansion (`"${args[@]}"` when nothing was appended) under `set -u` counts as an

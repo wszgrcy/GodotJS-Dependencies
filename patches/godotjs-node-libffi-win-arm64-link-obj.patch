@@ -1,32 +1,33 @@
 From: godotjs
 Subject: [godotjs] libffi: put win64_armasm.obj where the binaries that need it link it
 
-Windows/arm64 builds libffi's assembly by assembling src/aarch64/win64_armasm.S into
-a standalone object and naming that object in the libffi target's own `libraries`.
-libffi is a static library, so nothing ever links it and the entry is never used: the
-three symbols the object exports - ffi_call_SYSV, ffi_closure_SYSV, ffi_closure_SYSV_V,
-all called from src/aarch64/ffi.c - stay undefined, and the first binary to link
-libffi.lib stops at its link step (node_mksnapshot.exe: error LNK2019 three times,
-then LNK1120). Every other platform gets those symbols inside the archive, because
-there sysv.S is one of libffi's sources.
+Windows/arm64 builds libffi's assembly by assembling src/aarch64/win64_armasm.S into a
+standalone object and naming that object in the libffi target's own `libraries`. libffi
+is a static library, so nothing ever links it and the entry is never used: the three
+symbols the object exports - ffi_call_SYSV, ffi_closure_SYSV, ffi_closure_SYSV_V, all
+called from src/aarch64/ffi.c - stay undefined, and the first binary to link libffi.lib
+stops at its link step (node_mksnapshot.exe: error LNK2019 three times, then LNK1120).
+Every other platform gets those symbols inside the archive, because there sysv.S is one
+of libffi's sources.
 
 Move the object to the generated-sources directory and repeat the entry under
 link_settings, the block gyp merges into the link line of every dependent - the same
 route deps/crates/crates.gyp already uses to reach those binaries.
 
-The directory matters. A path handed over through link_settings is resolved in the
-depending target's own directories, and INTERMEDIATE_DIR differs per target: keeping
-it there asked link.exe for obj\node_mksnapshot.gen\win64_armasm.obj, which is not
-where the action writes. SHARED_INTERMEDIATE_DIR is the one directory all targets of a
-toolset agree on, and host and target toolsets each have their own - which is right
-here, because a cross build's host tool links the host libffi. Windows/arm64 only,
-and the object is still named where it was, so nothing that saw it before stops
-seeing it.
+The directory is the part that took a second run to get right. A path arriving through
+link_settings is expanded with the depending target's variables, and INTERMEDIATE_DIR
+is filled in per target, so naming it there asked link.exe for
+obj\node_mksnapshot.gen\win64_armasm.obj - a file that never exists. The ninja
+generator defines SHARED_INTERMEDIATE_DIR as PRODUCT_DIR/gen for the whole build
+(tools/gyp/pylib/gyp/generator/ninja.py), which is one directory every target agrees
+on: the action writes there, libffi names it there, dependents get it from there.
+Windows/arm64 only, and the object is still named where it was, so nothing that saw it
+before stops seeing it.
 diff --git a/deps/libffi/libffi.gyp b/deps/libffi/libffi.gyp
-index f3122a4..8842547 100644
+index f3122a4..251ccf7 100644
 --- a/deps/libffi/libffi.gyp
 +++ b/deps/libffi/libffi.gyp
-@@ -311,8 +311,25 @@
+@@ -311,8 +311,26 @@
          ['OS == "win" and target_arch == "arm64"', {
            # Link the prebuilt object file directly
            'libraries': [
@@ -39,12 +40,13 @@ index f3122a4..8842547 100644
 +          # exports. link_settings is the block gyp merges into the link line of every
 +          # dependent.
 +          #
-+          # The path goes through SHARED_INTERMEDIATE_DIR rather than staying in
-+          # INTERMEDIATE_DIR for a reason: a linked-in path from link_settings is
-+          # resolved in the depending target's own directories, and INTERMEDIATE_DIR
-+          # differs from target to target - naming it there asked for
-+          # obj/node_mksnapshot.gen/win64_armasm.obj, a file that never exists. The
-+          # generated-sources directory is the one place every target agrees on.
++          # The path has to be one every target agrees on, because a path that arrives
++          # through link_settings is expanded with the depending target's variables:
++          # INTERMEDIATE_DIR is filled in per target (asking for
++          # obj/node_mksnapshot.gen/win64_armasm.obj, which never exists), while the
++          # ninja generator defines SHARED_INTERMEDIATE_DIR as PRODUCT_DIR/gen for the
++          # whole build (tools/gyp/pylib/gyp/generator/ninja.py). The action writes
++          # there, libffi names it there, dependents get it from there.
 +          'link_settings': {
 +            'libraries': [
 +              '<(SHARED_INTERMEDIATE_DIR)/libffi/win64_armasm.obj',
@@ -53,7 +55,7 @@ index f3122a4..8842547 100644
            'actions': [
              {
                'action_name': 'assemble_win64_arm_asm',
-@@ -326,7 +343,7 @@
+@@ -326,7 +344,7 @@
                  '<(SHARED_INTERMEDIATE_DIR)/libffi/fficonfig.h',
                ],
                'outputs': [

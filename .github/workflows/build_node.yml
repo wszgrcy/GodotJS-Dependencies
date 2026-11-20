@@ -986,7 +986,20 @@ jobs:
           fi
           if [ "$NODE_PLATFORM" = android ] || [ "$NODE_PLATFORM" = ios ]; then
             echo "cross build for $NODE_PLATFORM/$NODE_ARCH: skipping the host smoke test"
-            ls -l out/Release/libnode.a out/Release/libv8_base_without_compiler.a
+            # The archives are the deliverable for a cross build, so say out loud that
+            # they were produced. They are not in out/Release itself: ninja writes a
+            # static library under out/Release/obj/<where its target lives>/, so a
+            # hard-coded out/Release/libnode.a is a false alarm after a perfectly good
+            # build. Look them up by name, the way package_node.sh does.
+            for lib in libnode.a libv8_base_without_compiler.a; do
+              found="$(find out/Release -name "$lib" -type f -print -quit)"
+              if [ -z "$found" ]; then
+                echo "no $lib anywhere under out/Release; archives that were produced:"
+                find out/Release -name '*.a' -type f
+                exit 1
+              fi
+              ls -l "$found"
+            done
           else
           "$NODE_BIN" -p 'process.versions.v8 + " icu=" + process.versions.icu'
           "$NODE_BIN" -e '
